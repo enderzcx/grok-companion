@@ -15,17 +15,19 @@ import signal
 import subprocess
 import sys
 import textwrap
+import time
 import uuid
 from pathlib import Path
 from shutil import which
 from typing import Any
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 DEFAULT_TIMEOUT = 1800
 DEFAULT_MAX_TURNS = 20
 DEFAULT_CONTEXT_LIMIT = 80000
 JOB_ROOT_NAME = ".grok-companion"
+TERMINAL_STATUSES = {"complete", "failed", "timeout", "cancelled"}
 
 
 def utc_now() -> str:
@@ -52,6 +54,45 @@ def default_jobs_dir() -> Path:
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def atomic_write_text(path: Path, value: str) -> None:
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_text(value, encoding="utf-8")
+        os.replace(temp, path)
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
+def finalize_cancelled_job(job_dir: Path, meta: dict[str, Any], returncode: int = 130) -> dict[str, Any]:
+    result_path = job_dir / "result.md"
+    text = result_path.read_text(encoding="utf-8") if result_path.exists() else ""
+    atomic_write_text(result_path, text)
+    atomic_write_text(
+        job_dir / "result.json",
+        json.dumps(
+            {
+                "job_id": meta["job_id"],
+                "status": "cancelled",
+                "returncode": returncode,
+                "text": text.strip(),
+                "parsed": None,
+                "stderr_tail": "",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+    )
+    meta["status"] = "cancelled"
+    meta["returncode"] = returncode
+    meta["cancelled_at"] = meta.get("cancelled_at") or utc_now()
+    meta["finished_at"] = meta.get("finished_at") or utc_now()
+    meta.pop("pid", None)
+    save_meta(job_dir, meta)
+    return meta
 
 
 def trim_text(value: str, limit: int = DEFAULT_CONTEXT_LIMIT) -> tuple[str, bool]:
@@ -104,6 +145,51 @@ def git_capture(args: list[str], cwd: Path, timeout: int = 45) -> str:
     return f"[git {' '.join(args)} failed: {err or result['returncode']}]"
 
 
+def collect_untracked_patch(root: Path, context_limit: int) -> tuple[str, list[str]]:
+    result = run_quiet(["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=root)
+    if not result["ok"]:
+        return f"[git ls-files for untracked files failed: {result['stderr'].strip() or result['returncode']}]", []
+
+    relative_paths = [item for item in result["stdout"].split("\0") if item]
+    sections: list[str] = []
+    included: list[str] = []
+    remaining = max(context_limit, 0)
+    for relative in relative_paths:
+        if remaining <= 0:
+            break
+        candidate = root / relative
+        if candidate.is_symlink():
+            continue
+        path = candidate.resolve()
+        if path == root or root not in path.parents or not path.is_file():
+            continue
+        included.append(relative)
+        header = [f"diff --git a/{relative} b/{relative}", "new file mode", "--- /dev/null", f"+++ b/{relative}"]
+        try:
+            with path.open("rb") as handle:
+                data = handle.read(remaining + 1)
+        except OSError as exc:
+            section = "\n".join([*header, f"Unreadable untracked file: {exc}"])
+            sections.append(section)
+            remaining -= len(section)
+            continue
+        file_truncated = len(data) > remaining
+        data = data[:remaining]
+        if b"\0" in data:
+            section = "\n".join([*header, "Binary untracked file omitted."])
+            sections.append(section)
+            remaining -= len(section)
+            continue
+        text = data.decode("utf-8", errors="replace")
+        added_lines = "\n".join("+" + line for line in text.splitlines())
+        if file_truncated:
+            added_lines += f"\n+[... untracked file truncated to remaining context budget ...]"
+        section = "\n".join([*header, "@@ untracked file @@", added_lines])
+        sections.append(section)
+        remaining -= len(section)
+    return "\n\n".join(sections), included
+
+
 def collect_git_context(cwd: Path, base: str | None, context_limit: int) -> dict[str, Any]:
     inside = run_quiet(["git", "rev-parse", "--is-inside-work-tree"], cwd=cwd)
     if not inside["ok"] or inside["stdout"].strip() != "true":
@@ -126,6 +212,7 @@ def collect_git_context(cwd: Path, base: str | None, context_limit: int) -> dict
         diff = git_capture(["diff", "--find-renames", f"{base}...HEAD"], root, timeout=120)
         target = f"{base}...HEAD"
     else:
+        untracked_patch, untracked_files = collect_untracked_patch(root, context_limit)
         stat_parts = [
             "Unstaged diff:",
             git_capture(["diff", "--stat"], root),
@@ -139,9 +226,14 @@ def collect_git_context(cwd: Path, base: str | None, context_limit: int) -> dict
             "",
             "## Staged diff",
             git_capture(["diff", "--cached", "--find-renames"], root, timeout=120),
+            "",
+            "## Untracked files",
+            untracked_patch,
         ]
         stat = "\n".join(stat_parts).strip()
-        name_status = git_capture(["diff", "--name-status"], root) + "\n" + git_capture(["diff", "--cached", "--name-status"], root)
+        tracked_name_status = git_capture(["diff", "--name-status"], root) + "\n" + git_capture(["diff", "--cached", "--name-status"], root)
+        untracked_name_status = "\n".join(f"??\t{path}" for path in untracked_files)
+        name_status = tracked_name_status + "\n" + untracked_name_status
         diff = "\n".join(diff_parts).strip()
         target = "working tree + index"
 
@@ -268,7 +360,7 @@ def load_meta(job_dir: Path) -> dict[str, Any]:
 
 def save_meta(job_dir: Path, meta: dict[str, Any]) -> None:
     meta["updated_at"] = utc_now()
-    (job_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(job_dir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
 
 
 def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: dict[str, Any] | None = None) -> tuple[str, Path, dict[str, Any]]:
@@ -279,7 +371,7 @@ def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: di
     ensure_dir(job_dir)
     (job_dir / "prompt.md").write_text(prompt, encoding="utf-8")
     if git_context is not None:
-        (job_dir / "context.json").write_text(json.dumps(git_context, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        atomic_write_text(job_dir / "context.json", json.dumps(git_context, ensure_ascii=False, indent=2) + "\n")
     meta = {
         "job_id": job_id,
         "version": VERSION,
@@ -364,6 +456,9 @@ def extract_text(stdout: str) -> tuple[str, Any]:
 
 def run_job(job_dir: Path) -> int:
     meta = load_meta(job_dir)
+    if meta.get("status") == "cancel_requested":
+        finalize_cancelled_job(job_dir, meta)
+        return 130
     meta["status"] = "running"
     meta["pid"] = os.getpid()
     meta["started_at"] = utc_now()
@@ -386,32 +481,35 @@ def run_job(job_dir: Path) -> int:
         (job_dir / "raw.stdout").write_text(stdout, encoding="utf-8")
         (job_dir / "raw.stderr").write_text(stderr, encoding="utf-8")
         text, parsed = extract_text(stdout)
-        (job_dir / "result.md").write_text(text.strip() + ("\n" if text.strip() else ""), encoding="utf-8")
+        atomic_write_text(job_dir / "result.md", text.strip() + ("\n" if text.strip() else ""))
+        latest_meta = load_meta(job_dir)
+        status = "cancelled" if latest_meta.get("status") in {"cancel_requested", "cancelled"} else ("complete" if proc.returncode == 0 else "failed")
         result_json = {
             "job_id": meta["job_id"],
-            "status": "complete" if proc.returncode == 0 else "failed",
+            "status": status,
             "returncode": proc.returncode,
             "text": text,
             "parsed": parsed,
             "stderr_tail": stderr[-4000:],
         }
-        (job_dir / "result.json").write_text(json.dumps(result_json, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        meta["status"] = "complete" if proc.returncode == 0 else "failed"
-        meta["returncode"] = proc.returncode
-        meta["finished_at"] = utc_now()
-        meta.pop("pid", None)
-        save_meta(job_dir, meta)
+        atomic_write_text(job_dir / "result.json", json.dumps(result_json, ensure_ascii=False, indent=2) + "\n")
+        latest_meta["status"] = status
+        latest_meta["returncode"] = proc.returncode
+        latest_meta["finished_at"] = utc_now()
+        latest_meta.pop("pid", None)
+        save_meta(job_dir, latest_meta)
         return proc.returncode
     except FileNotFoundError:
         message = f"grok binary not found: {cmd[0]}"
         (job_dir / "raw.stderr").write_text(message + "\n", encoding="utf-8")
-        (job_dir / "result.md").write_text("", encoding="utf-8")
-        meta["status"] = "failed"
-        meta["returncode"] = 127
-        meta["error"] = message
-        meta["finished_at"] = utc_now()
-        meta.pop("pid", None)
-        save_meta(job_dir, meta)
+        atomic_write_text(job_dir / "result.md", "")
+        latest_meta = load_meta(job_dir)
+        latest_meta["status"] = "cancelled" if latest_meta.get("status") in {"cancel_requested", "cancelled"} else "failed"
+        latest_meta["returncode"] = 127
+        latest_meta["error"] = message
+        latest_meta["finished_at"] = utc_now()
+        latest_meta.pop("pid", None)
+        save_meta(job_dir, latest_meta)
         return 127
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout or ""
@@ -423,17 +521,20 @@ def run_job(job_dir: Path) -> int:
         (job_dir / "raw.stdout").write_text(stdout, encoding="utf-8")
         (job_dir / "raw.stderr").write_text(stderr + f"\nTimed out after {meta.get('timeout')}s\n", encoding="utf-8")
         text, parsed = extract_text(stdout)
-        (job_dir / "result.md").write_text(text.strip() + ("\n" if text.strip() else ""), encoding="utf-8")
-        meta["status"] = "timeout"
-        meta["returncode"] = 124
-        meta["finished_at"] = utc_now()
-        meta.pop("pid", None)
-        save_meta(job_dir, meta)
-        (job_dir / "result.json").write_text(
+        atomic_write_text(job_dir / "result.md", text.strip() + ("\n" if text.strip() else ""))
+        latest_meta = load_meta(job_dir)
+        status = "cancelled" if latest_meta.get("status") in {"cancel_requested", "cancelled"} else "timeout"
+        latest_meta["status"] = status
+        latest_meta["returncode"] = 124
+        latest_meta["finished_at"] = utc_now()
+        latest_meta.pop("pid", None)
+        save_meta(job_dir, latest_meta)
+        atomic_write_text(
+            job_dir / "result.json",
             json.dumps(
                 {
                     "job_id": meta["job_id"],
-                    "status": "timeout",
+                    "status": status,
                     "returncode": 124,
                     "text": text,
                     "parsed": parsed,
@@ -443,7 +544,6 @@ def run_job(job_dir: Path) -> int:
                 indent=2,
             )
             + "\n",
-            encoding="utf-8",
         )
         return 124
 
@@ -452,25 +552,36 @@ def start_background(job_dir: Path) -> int:
     stdout_path = job_dir / "runner.stdout"
     stderr_path = job_dir / "runner.stderr"
     cmd = [sys.executable, str(Path(__file__).resolve()), "_run-job", str(job_dir)]
+    meta = load_meta(job_dir)
+    meta["status"] = "starting"
+    meta["runner_command"] = cmd
+    save_meta(job_dir, meta)
     with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
         proc = subprocess.Popen(cmd, stdout=out, stderr=err, start_new_session=True)
     meta = load_meta(job_dir)
-    meta["status"] = "running"
-    meta["pid"] = proc.pid
-    meta["runner_command"] = cmd
+    if meta.get("status") in {"created", "starting", "running"}:
+        meta["status"] = "running"
+        meta["pid"] = proc.pid
     save_meta(job_dir, meta)
     return proc.pid
 
 
 def resolve_job(jobs_dir: Path, job_id: str | None) -> Path:
     ensure_dir(jobs_dir)
+    jobs_dir = jobs_dir.resolve()
     if job_id:
-        matches = sorted(jobs_dir.glob(f"{job_id}*"))
+        if Path(job_id).name != job_id or job_id in {".", ".."} or "/" in job_id or "\\" in job_id:
+            raise SystemExit(f"Invalid job id: {job_id}")
+        direct = jobs_dir / job_id
+        if direct.is_dir() and (direct / "meta.json").exists():
+            return direct
+        matches = sorted(
+            path
+            for path in jobs_dir.iterdir()
+            if path.is_dir() and path.name.startswith(job_id) and (path / "meta.json").exists()
+        )
         if len(matches) == 1:
             return matches[0]
-        direct = jobs_dir / job_id
-        if direct.exists():
-            return direct
         raise SystemExit(f"Job not found or ambiguous: {job_id}")
     jobs = sorted([p for p in jobs_dir.iterdir() if (p / "meta.json").exists()])
     if not jobs:
@@ -486,6 +597,52 @@ def pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+
+
+def process_running(pid: int) -> bool:
+    if os.name == "nt":
+        result = run_quiet(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], timeout=3)
+        return result["ok"] and f'"{pid}"' in result["stdout"]
+    result = run_quiet(["ps", "-o", "stat=", "-p", str(pid)], timeout=3)
+    if result["ok"]:
+        state = result["stdout"].strip()
+        return bool(state) and not state.startswith("Z")
+    return pid_alive(pid)
+
+
+def wait_for_process_exit(pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not process_running(pid):
+            return True
+        time.sleep(0.05)
+    return not process_running(pid)
+
+
+def terminate_process_tree(pid: int) -> None:
+    if os.name == "nt":
+        proc = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            text=True,
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            raise ProcessLookupError(proc.stderr.strip() or proc.stdout.strip() or f"taskkill failed for pid {pid}")
+        if not wait_for_process_exit(pid, 2.0):
+            raise RuntimeError(f"process tree still running after taskkill: {pid}")
+        return
+    if hasattr(os, "killpg"):
+        os.killpg(pid, signal.SIGTERM)
+    else:
+        os.kill(pid, signal.SIGTERM)
+    if wait_for_process_exit(pid, 2.0):
+        return
+    if hasattr(os, "killpg"):
+        os.killpg(pid, signal.SIGKILL)
+    else:
+        os.kill(pid, signal.SIGKILL)
+    if not wait_for_process_exit(pid, 2.0):
+        raise RuntimeError(f"process tree still running after SIGKILL: {pid}")
 
 
 def command_setup(args: argparse.Namespace) -> int:
@@ -512,6 +669,9 @@ def command_setup(args: argparse.Namespace) -> int:
         else:
             report["checks"]["superx_doctor"] = {"ok": False, "returncode": 127, "stdout": "", "stderr": "superx not found"}
 
+    if any(isinstance(check, dict) and not check.get("ok", False) for check in report["checks"].values()):
+        report["status"] = "degraded"
+
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
@@ -529,7 +689,8 @@ def command_setup(args: argparse.Namespace) -> int:
 
 
 def execute_mode(args: argparse.Namespace, mode: str) -> int:
-    task = " ".join(args.task).strip()
+    task_parts = args.task[1:] if args.task and args.task[0] == "--" else args.task
+    task = " ".join(task_parts).strip()
     if not task:
         raise SystemExit(f"{mode} requires a task/prompt")
     git_context = None
@@ -574,10 +735,13 @@ def command_status(args: argparse.Namespace) -> int:
     for job in jobs:
         meta = load_meta(job)
         pid = meta.get("pid")
-        if meta.get("status") == "running" and pid and not pid_alive(int(pid)):
-            meta["status"] = "unknown"
-            meta["warning"] = "pid is no longer alive but no final result was recorded"
-            save_meta(job, meta)
+        if meta.get("status") in {"running", "cancel_requested"} and pid and not process_running(int(pid)):
+            if meta.get("status") == "cancel_requested":
+                meta = finalize_cancelled_job(job, meta)
+            else:
+                meta["status"] = "unknown"
+                meta["warning"] = "pid is no longer alive but no final result was recorded"
+                save_meta(job, meta)
         rows.append(meta)
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
@@ -597,7 +761,9 @@ def command_result(args: argparse.Namespace) -> int:
     if args.json:
         result_path = job_dir / "result.json"
         if result_path.exists():
-            print(result_path.read_text(encoding="utf-8"), end="")
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            payload["job_dir"] = str(job_dir)
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(json.dumps(load_meta(job_dir), ensure_ascii=False, indent=2))
         return 0
@@ -617,22 +783,81 @@ def command_cancel(args: argparse.Namespace) -> int:
     meta = load_meta(job_dir)
     pid = meta.get("pid")
     if not pid:
-        print(f"Job {meta['job_id']} has no running pid; status={meta.get('status')}")
+        if meta.get("status") in {"created", "starting"}:
+            meta["status"] = "cancel_requested"
+            meta["cancel_requested_at"] = utc_now()
+            save_meta(job_dir, meta)
+            payload = {"job_id": meta["job_id"], "status": "cancel_requested", "cancelled": False}
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"Cancellation requested for {meta['job_id']}")
+            return 0
+        payload = {
+            "job_id": meta["job_id"],
+            "status": meta.get("status"),
+            "cancelled": False,
+            "error": "job has no running pid",
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"Job {meta['job_id']} has no running pid; status={meta.get('status')}")
         return 1
+    meta["status"] = "cancel_requested"
+    meta["cancel_requested_at"] = utc_now()
+    save_meta(job_dir, meta)
     try:
-        os.kill(int(pid), signal.SIGTERM)
-        meta["status"] = "cancelled"
-        meta["cancelled_at"] = utc_now()
-        meta.pop("pid", None)
-        save_meta(job_dir, meta)
-        print(f"Cancelled {meta['job_id']} (pid {pid})")
+        terminate_process_tree(int(pid))
+        latest_meta = load_meta(job_dir)
+        finalize_cancelled_job(job_dir, latest_meta)
+        payload = {"job_id": meta["job_id"], "status": "cancelled", "cancelled": True, "pid": int(pid)}
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"Cancelled {meta['job_id']} (pid {pid})")
         return 0
     except ProcessLookupError:
-        meta["status"] = "unknown"
-        meta["warning"] = "pid not found during cancel"
-        meta.pop("pid", None)
-        save_meta(job_dir, meta)
-        print(f"Process already gone for {meta['job_id']}")
+        latest_meta = load_meta(job_dir)
+        if latest_meta.get("status") in {"cancel_requested", "cancelled"}:
+            finalize_cancelled_job(job_dir, latest_meta)
+            payload = {"job_id": meta["job_id"], "status": "cancelled", "cancelled": True, "pid": int(pid)}
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"Cancelled {meta['job_id']} (process already exited)")
+            return 0
+        if latest_meta.get("status") not in TERMINAL_STATUSES:
+            latest_meta["status"] = "unknown"
+            latest_meta["warning"] = "pid not found during cancel"
+            latest_meta.pop("pid", None)
+            save_meta(job_dir, latest_meta)
+        payload = {
+            "job_id": meta["job_id"],
+            "status": latest_meta.get("status"),
+            "cancelled": False,
+            "error": "process already gone",
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"Process already gone for {meta['job_id']}")
+        return 1
+    except RuntimeError as exc:
+        latest_meta = load_meta(job_dir)
+        latest_meta["status"] = "cancel_requested"
+        latest_meta["warning"] = str(exc)
+        save_meta(job_dir, latest_meta)
+        payload = {
+            "job_id": meta["job_id"],
+            "status": "cancel_requested",
+            "cancelled": False,
+            "error": str(exc),
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(str(exc))
         return 1
 
 
@@ -714,6 +939,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cancel = sub.add_parser("cancel", help="Cancel a running background job")
     p_cancel.add_argument("job_id", nargs="?")
     p_cancel.add_argument("--jobs-dir")
+    p_cancel.add_argument("--json", action="store_true")
     p_cancel.set_defaults(func=command_cancel)
 
     p_run = sub.add_parser("_run-job", help=argparse.SUPPRESS)

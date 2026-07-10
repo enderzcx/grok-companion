@@ -2,46 +2,134 @@
 
 [中文](./README.md)
 
-A **Codex plugin** plus local **`grb` bridge** that lets Codex use the local **Grok CLI** as an external collaborator.
+Use the local **Grok CLI** as a full external collaborator inside **Codex**.
 
-This project is a Codex plugin. Its structure and product direction are inspired by [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc), but it is not a Claude Code slash-command plugin. Codex shells out to `grb.py`; every run leaves inspectable job artifacts on disk.
+Grok Companion v0.2 is a Codex plugin with native MCP tools. Codex can call `grok_*` tools for consultation, read-only review, adversarial review, research, delegation, and durable background job management.
 
-## What It Does
+> **This is not a Codex sidebar terminal.**
+>
+> It does not embed Grok as a persistent shell or sidebar chat. The product surface is native MCP tools plus a CLI fallback, backed by the local `grok` process and inspectable job artifacts.
 
-| Command | Purpose |
-|---|---|
-| `ask` | Direct question |
-| `consult` | Second opinion and tradeoff review |
-| `review` | Read-only code review with git context |
-| `adversarial-review` | Read-only challenge review for direction, assumptions, and risk |
-| `research` | Research brief |
-| `delegate` | Bounded task handoff |
-| `status` | Running and recent jobs |
-| `result` | Print a job result |
-| `cancel` | Cancel a background job |
-| `setup` | Check `grok`, jobs directory, and optional `superx` |
+The product direction is inspired by [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc), but this is a Codex plugin, not a Claude Code slash-command plugin.
 
-Use `--background` for long work. `review` and `adversarial-review` only produce findings; Codex still owns edits, tests, commits, and shipping.
+## Capabilities
+
+| Capability | MCP tool | CLI | Notes |
+|---|---|---|---|
+| Environment check | `grok_setup` | `setup` | Check `grok`, visible models, jobs, and optional `superx` |
+| Ask | `grok_ask` | `ask` | General questions |
+| Consult | `grok_consult` | `consult` | Second opinions and tradeoffs |
+| Code review | `grok_review` | `review` | Findings only; no edits |
+| Adversarial review | `grok_adversarial_review` | `adversarial-review` | Challenge assumptions and failure modes |
+| Research | `grok_research` | `research` | General source-aware research |
+| Delegate | `grok_delegate` | `delegate` | Full local Grok CLI; may use tools or edit files |
+| Status | `grok_status` | `status` | Inspect recent or specific jobs |
+| Result | `grok_result` | `result` | Read stored results |
+| Cancel | `grok_cancel` | `cancel` | Terminate the runner and its children |
+
+`review` and `adversarial-review` are read-only prompt contracts. Codex still owns edits, tests, commits, and shipping.
+
+## Why MCP
+
+v0.1 required Codex to shell out to `grb.py`. v0.2 registers a local stdio MCP server so Codex receives first-class `grok_*` tools:
+
+```json
+{
+  "mcpServers": {
+    "grok-companion": {
+      "command": "python3",
+      "args": ["./scripts/mcp_server.py"],
+      "cwd": "."
+    }
+  }
+}
+```
+
+`mcp_server.py` handles protocol messages, argument validation, and structured results. It delegates every task to `grb.py`, so MCP and CLI share one prompt builder, git-context collector, job model, and artifact format.
+
+The MCP server uses only the Python standard library and needs no additional pip packages.
+
+## Background By Default
+
+All MCP launch tools always use background jobs:
+
+```text
+Codex calls grok_review / grok_research / ...
+        -> receives job_id immediately
+        -> local grok runs in the background
+        -> grok_status reports progress
+        -> grok_result returns the stored answer
+```
+
+This avoids treating a 25-second-to-multi-minute Grok call as a failed Codex wait and keeps status or cancellation available. Use the CLI fallback when foreground waiting is required.
+
+Typical flow:
+
+1. Run `grok_setup` when environment or authentication needs checking.
+2. Launch `grok_review`, `grok_consult`, or another task and keep the returned `job_id`.
+3. Call `grok_status` until the job reaches a terminal state.
+4. Call `grok_result` for the answer.
+5. Use `grok_cancel` to stop early.
+
+Every MCP call requires the absolute current workspace path as `cwd`. Keep `cwd` and an optional `jobs_dir` consistent for the same job.
+
+## Use In Codex
+
+After installation, start a new Codex task and ask naturally:
+
+```text
+Ask Grok to review my current changes.
+Use Grok for an adversarial review of this caching design.
+Have Grok research these three options in the background and report back.
+Delegate this bounded implementation task to Grok, then verify its work.
+```
+
+Codex prefers the loaded `grok_*` MCP tools. If the MCP server is unavailable, the bundled skill falls back to `grb.py`.
+
+## CLI Fallback
+
+The complete CLI remains available for fallback and debugging:
+
+```bash
+python3 plugins/grok-companion/scripts/grb.py setup
+python3 plugins/grok-companion/scripts/grb.py ask "Explain this error"
+python3 plugins/grok-companion/scripts/grb.py consult --include-git-context "Is this plan sound?"
+python3 plugins/grok-companion/scripts/grb.py review --base main "Review this branch"
+python3 plugins/grok-companion/scripts/grb.py adversarial-review --base main "Challenge the architecture"
+python3 plugins/grok-companion/scripts/grb.py research --background "Research the options"
+python3 plugins/grok-companion/scripts/grb.py status
+python3 plugins/grok-companion/scripts/grb.py result
+python3 plugins/grok-companion/scripts/grb.py cancel <job-id>
+```
+
+MCP launch tools always use background execution. The CLI defaults to foreground execution, so add `--background` for long work.
+
+Useful flags include `--base`, `--include-git-context`, `--jobs-dir`, `--model`, `--effort`, `--max-turns`, `--timeout`, `--tools`, `--disallowed-tools`, `--best-of-n`, and `--session-id`.
+
+Without `--base`, review covers the working tree plus index: unstaged, staged, and untracked text files within the context budget.
 
 ## Relationship To superx
 
-- **superx**: exact X/Twitter fetch, threads, articles, account/search, and X-native tool diagnostics. Prefer superx for X-specific tasks.
-- **grok-companion**: general Grok collaboration. Use it for review, consult, research, delegate, and job control.
+| | superx | grok-companion |
+|---|---|---|
+| Role | Exact X/Twitter retrieval and native X tools | General Grok collaboration |
+| Prefer for | Status URLs, threads/articles, accounts, keyword/semantic search, X diagnostics | Review, consultation, general research, delegation, jobs |
+| Relationship | Separate X-specific route | Can diagnose `superx`, but does not replace it |
 
-They complement each other. `grb setup` can probe `superx`; it does not replace it.
+Continue to use `superx` first for exact X/Twitter tasks.
 
 ## Prerequisites
 
-1. Working Codex.
-2. Local Grok CLI: `grok`.
-3. Completed `grok login`, with a working account.
-4. Python 3.
+1. A working Codex installation.
+2. The local [Grok CLI](https://x.ai/cli), available as `grok` or configured through `GROK_BIN`.
+3. A working `grok login` session with model access.
+4. Python 3.9 or newer.
 
-Optional: if `superx` is on `PATH`, `setup --probe-superx` can include it in diagnostics.
+Optional: keep `superx` on `PATH` for combined diagnostics.
 
 ## Install
 
-From the public GitHub repo:
+From the public repository:
 
 ```bash
 codex plugin marketplace add enderzcx/grok-companion --sparse .agents --sparse plugins/grok-companion
@@ -57,51 +145,18 @@ codex plugin marketplace add "$PWD"
 codex plugin add grok-companion@grok-companion
 ```
 
-After install, verify the environment:
+Start a new Codex task after installing or updating. An already open task will not automatically gain newly installed skills and MCP tools.
+
+Environment checks:
 
 ```bash
-python3 plugins/grok-companion/scripts/grb.py setup
-plugins/grok-companion/scripts/grb setup --json
+python3 plugins/grok-companion/scripts/grb.py setup --json
+python3 plugins/grok-companion/scripts/grb.py setup --probe-superx --json
 ```
-
-## Quick Start
-
-From the repository root:
-
-```bash
-python3 plugins/grok-companion/scripts/grb.py setup
-python3 plugins/grok-companion/scripts/grb.py ask "Explain this error"
-python3 plugins/grok-companion/scripts/grb.py consult --include-git-context "Is this plan sound?"
-python3 plugins/grok-companion/scripts/grb.py review --base main "Review this branch"
-python3 plugins/grok-companion/scripts/grb.py adversarial-review --base main "Challenge the architecture and risk model"
-python3 plugins/grok-companion/scripts/grb.py research --background "Research options and report back"
-python3 plugins/grok-companion/scripts/grb.py status
-python3 plugins/grok-companion/scripts/grb.py result
-python3 plugins/grok-companion/scripts/grb.py cancel <job-id>
-```
-
-From the plugin root:
-
-```bash
-python3 scripts/grb.py review --base main "review this branch"
-```
-
-Useful flags:
-
-| Flag | Meaning |
-|---|---|
-| `--base main` | Branch diff against a base ref, recommended for reviews |
-| `--include-git-context` | Attach git context for non-review modes |
-| `--background` | Start and return `job_id` immediately |
-| `--jobs-dir` / `GROK_COMPANION_JOBS_DIR` | Override jobs directory |
-| `--model` / `--effort` | Forwarded to local `grok` |
-| `--format json` | Structured output |
-
-Without `--base`, reviews cover the working tree and index, meaning unstaged + staged diffs.
 
 ## Job Artifacts
 
-Foreground and background runs both write durable files, by default under the current git root:
+Foreground and background tasks write durable artifacts under the current git repository by default:
 
 ```text
 .grok-companion/jobs/<job-id>/
@@ -112,59 +167,50 @@ Foreground and background runs both write durable files, by default under the cu
   raw.stderr
   result.md
   result.json
+  runner.stdout
+  runner.stderr
 ```
 
 - Default: `<repo>/.grok-companion/jobs`
-- Override with `--jobs-dir` or `GROK_COMPANION_JOBS_DIR`
-- `.grok-companion/` is ignored in `.gitignore`, so local job output is not committed
+- Override with `jobs_dir`, `--jobs-dir`, or `GROK_COMPANION_JOBS_DIR`
+- `.grok-companion/` is ignored by git
+- Status, result, and cancellation use on-disk state rather than hidden memory
+- macOS/Linux cancellation targets the process group; Windows uses `taskkill /T`
 
-`status`, `result`, and `cancel` use these artifacts. There is no hidden in-memory state.
+## Data And Safety Boundaries
+
+- The companion does not store API keys; it uses the local `grok login` state.
+- Prompts, git diffs, stdout/stderr, and results are stored in the local job directory.
+- The Grok CLI also sends applicable prompts and context to xAI under the user's account and xAI terms.
+- Do not commit or share job directories containing secrets or customer data.
+- Review is a prompt-level read-only contract, not an OS sandbox.
+- Delegate uses the full local Grok CLI and may edit files. Invoke it only after explicit authorization, then inspect and verify all changes.
 
 ## Architecture
 
-Three layers:
-
-1. **Codex plugin surface**: `.codex-plugin/plugin.json` and `skills/grok-companion/SKILL.md`
-2. **Companion runtime**: `scripts/grb.py`, job artifacts, background processes, and result retrieval
-3. **Adapters**: local `grok` CLI, git diff/context, and optional `superx` diagnostics
+1. **Plugin surface**: `.codex-plugin/plugin.json`, `.mcp.json`, and the skill
+2. **MCP adapter**: `scripts/mcp_server.py`
+3. **Job runtime**: `scripts/grb.py`, background processes, and artifacts
+4. **Capability adapters**: local Grok CLI, git context, and optional `superx` diagnostics
 
 See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
-
-## Codex Usage Rules
-
-- Do not invent in-process Grok tools; always shell out to `grb.py`.
-- Prefer `--background` for long runs when the user does not need the answer immediately.
-- Review modes are read-only contracts; Codex owns changes and verification.
-- Use `status` and `result` instead of re-running the same long job.
-- On auth failure, run `setup --json` and report the exact error.
 
 ## Tests
 
 ```bash
-python3 -m unittest tests/test_grb.py -v
+python3 -m unittest discover -s tests -v
 ```
 
-Tests use a fake `grok` binary; no live login is required.
+Tests use a fake `grok` binary and cover MCP initialization, discovery of all ten tools, background ask -> status -> result, process-tree cancellation, and the fast-completion race regression.
 
-## Layout
+## Public v0.2 Boundaries
 
-```text
-plugins/grok-companion/
-  .codex-plugin/plugin.json
-  scripts/grb
-  scripts/grb.py
-  skills/grok-companion/SKILL.md
-.agents/plugins/marketplace.json
-docs/ARCHITECTURE.md
-tests/test_grb.py
-```
-
-## Public v0 Boundaries
-
-- Depends on a working local `grok` CLI login.
-- `review` and `adversarial-review` are read-only; Codex remains owner of edits and shipping.
-- Background jobs are local OS processes tracked by pid and artifact state.
-- This is a Codex plugin. It does not implement Claude Code slash commands.
+- Requires a working local Grok CLI login.
+- MCP is the primary Codex path; CLI is a full fallback over the same runtime.
+- Background jobs are local processes plus disk artifacts, not a cloud queue.
+- There is no Codex sidebar terminal or persistent REPL.
+- There is no custom inline UI yet; one can be added later without replacing the job runtime.
+- Exact X/Twitter work remains the responsibility of `superx`.
 
 ## License
 

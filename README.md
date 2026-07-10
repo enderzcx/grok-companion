@@ -2,42 +2,130 @@
 
 [English](./README.en.md)
 
-让 **Codex** 通过本地 `grok` CLI，把 Grok 当作外部协作者使用。
+让 **Codex** 把本机 **Grok CLI** 当作完整的外部协作者使用。
 
-本项目是 **Codex plugin**，结构和产品思路参考 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)，但它不是 Claude Code 的 slash-command 插件。核心是一个 Codex skill 加本地 `grb` 桥：Codex 通过 shell 调用 `grb.py`，每次任务都会留下可检查的 job 产物。
+Grok Companion v0.2 是一个带原生 MCP 工具的 Codex plugin。Codex 可以直接调用 `grok_*` 做 consult、只读 review、adversarial review、research、delegate，以及管理持久化后台 job。
+
+> **这不是 Codex 侧边栏终端。**
+>
+> 它不会把 Grok 嵌成一个常驻 shell 或侧边栏聊天窗口。产品形态是 Codex 原生 MCP 工具 + CLI 回退，背后调用本机 `grok` 并返回可查询的 `job_id` 与产物文件。
+
+产品方向参考 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)，但本项目是 Codex plugin，不是 Claude Code slash-command 插件。
 
 ## 能做什么
 
-| 命令 | 用途 |
-|---|---|
-| `ask` | 直接提问 |
-| `consult` | 二意见、方案权衡 |
-| `review` | 只读代码审查，默认带 git 上下文 |
-| `adversarial-review` | 只读对抗式审查，挑战方向、假设和风险 |
-| `research` | 研究简报 |
-| `delegate` | 委托有边界的任务 |
-| `status` | 查看运行中和近期 job |
-| `result` | 读取 job 结果 |
-| `cancel` | 取消后台 job |
-| `setup` | 检查 `grok`、job 目录，可选探测 `superx` |
+| 能力 | MCP 工具 | CLI | 说明 |
+|---|---|---|---|
+| 环境检查 | `grok_setup` | `setup` | 检查 `grok`、可见模型和 job 目录，可选探测 `superx` |
+| 直接提问 | `grok_ask` | `ask` | 通用问答 |
+| 二意见 | `grok_consult` | `consult` | 方案与决策权衡 |
+| 代码审查 | `grok_review` | `review` | 只出 findings，不修改代码 |
+| 对抗审查 | `grok_adversarial_review` | `adversarial-review` | 挑战方向、假设和失败模式 |
+| 深度研究 | `grok_research` | `research` | 通用、源感知 research |
+| 有界委托 | `grok_delegate` | `delegate` | 调用完整本机 Grok CLI，可能使用工具或修改文件 |
+| 状态 | `grok_status` | `status` | 查看近期或指定 job |
+| 结果 | `grok_result` | `result` | 读取已存储结果 |
+| 取消 | `grok_cancel` | `cancel` | 终止后台 runner 及其子进程 |
 
-长任务可加 `--background`。`review` 和 `adversarial-review` 只输出审查结论；改代码、测试、提交和发布仍由 Codex 负责。
+`review` 和 `adversarial-review` 是只读 prompt 契约。修改代码、测试、提交和发布仍由 Codex 负责。
 
-## 与 superx 的关系
+## 为什么用 MCP
 
-- **superx**：精确 X/Twitter 抓取、线程、文章、账号与搜索、X 原生工具诊断。X 专用任务优先用 superx。
-- **grok-companion**：通用 Grok 协作桥。适合审查、consult、research、delegate 和 job 管理。
+v0.1 需要 Codex 通过 shell 调用 `grb.py`。v0.2 在插件中注册了本地 stdio MCP server，让 Codex 直接获得一组原生 `grok_*` 工具：
 
-二者互补，`grb setup` 可以探测 `superx`，但不会替代它。
+```json
+{
+  "mcpServers": {
+    "grok-companion": {
+      "command": "python3",
+      "args": ["./scripts/mcp_server.py"],
+      "cwd": "."
+    }
+  }
+}
+```
+
+`mcp_server.py` 只负责协议、参数校验和结构化结果，所有实际任务仍交给 `grb.py`。MCP 与 CLI 因此共用同一套 prompt、git context、后台进程和 job 产物，不会形成两套逐渐漂移的实现。
+
+MCP server 仅使用 Python 标准库，不需要额外安装 pip 包。
+
+## 默认后台任务
+
+所有启动型 MCP 工具都固定使用后台 job：
+
+```text
+Codex 调用 grok_review / grok_research / ...
+        -> 立即返回 job_id
+        -> 本机后台运行 grok
+        -> grok_status 查看进度
+        -> grok_result 读取结果
+```
+
+这让 25 秒到数分钟的 Grok 调用不会被 Codex 的单次等待预算误判为失败，也不会阻塞后续 `status` 或 `cancel`。需要前台等待时使用 CLI 回退。
+
+典型流程：
+
+1. `grok_setup` 检查环境。
+2. 调用 `grok_review`、`grok_consult` 或其他启动工具，获得 `job_id`。
+3. 用 `grok_status` 查询到终态。
+4. 用 `grok_result` 读取结果。
+5. 需要提前停止时调用 `grok_cancel`。
+
+每次 MCP 调用都要使用当前 Codex workspace 的绝对路径作为 `cwd`。同一 job 的 `cwd` 和可选 `jobs_dir` 必须保持一致。
+
+## 在 Codex 中使用
+
+安装后新开一个 Codex task，然后直接描述目标：
+
+```text
+让 Grok review 当前改动。
+让 Grok 对这个缓存方案做 adversarial review。
+让 Grok 调研这三个方案，后台跑，完成后告诉我。
+把这个有边界的实现任务委托给 Grok，然后由你检查结果。
+```
+
+Codex 会优先调用已加载的 `grok_*` MCP 工具。若 MCP 工具未加载，skill 会回退到 `grb.py`。
+
+## CLI 回退
+
+MCP 不可用或需要直接调试时，可以继续使用完整 CLI：
+
+```bash
+python3 plugins/grok-companion/scripts/grb.py setup
+python3 plugins/grok-companion/scripts/grb.py ask "解释这个报错"
+python3 plugins/grok-companion/scripts/grb.py consult --include-git-context "这个方案稳吗？"
+python3 plugins/grok-companion/scripts/grb.py review --base main "审查当前分支"
+python3 plugins/grok-companion/scripts/grb.py adversarial-review --base main "挑战架构与风险"
+python3 plugins/grok-companion/scripts/grb.py research --background "调研可选方案"
+python3 plugins/grok-companion/scripts/grb.py status
+python3 plugins/grok-companion/scripts/grb.py result
+python3 plugins/grok-companion/scripts/grb.py cancel <job-id>
+```
+
+MCP 启动工具固定后台；CLI 默认前台，长任务需要显式添加 `--background`。
+
+常用参数包括 `--base`、`--include-git-context`、`--jobs-dir`、`--model`、`--effort`、`--max-turns`、`--timeout`、`--tools`、`--disallowed-tools`、`--best-of-n` 和 `--session-id`。
+
+未指定 `--base` 时，审查覆盖 working tree + index，包括 unstaged、staged，以及受上下文预算限制的未跟踪文本文件。
+
+## 与 superx 的边界
+
+| | superx | grok-companion |
+|---|---|---|
+| 定位 | 精确 X/Twitter 抓取与 X 原生工具 | 通用 Grok 协作 |
+| 优先场景 | status URL、thread/article、账号、keyword/semantic search、X 诊断 | review、consult、通用 research、delegate、job 管理 |
+| 关系 | 独立的 X 专用入口 | 可以探测 `superx`，但不替代它 |
+
+精确 X/Twitter 任务继续优先使用 `superx`。
 
 ## 前置条件
 
-1. 已安装并可用的 Codex。
-2. 本机有 Grok CLI：`grok`。
-3. 已完成 `grok login`，并且当前账号可用。
-4. Python 3。
+1. 可用的 Codex。
+2. 本机安装了 [Grok CLI](https://x.ai/cli)，命令为 `grok`，或通过 `GROK_BIN` 指定。
+3. 已完成 `grok login`，当前账号可正常访问模型。
+4. Python 3.9 或更高版本。
 
-可选：本机有 `superx` 时，`setup --probe-superx` 可以一起诊断。
+可选：PATH 中有 `superx` 时，`grok_setup` 可以一起探测它。
 
 ## 安装
 
@@ -57,51 +145,18 @@ codex plugin marketplace add "$PWD"
 codex plugin add grok-companion@grok-companion
 ```
 
-安装后先检查环境：
+安装或更新后请新开一个 Codex task。已经打开的 task 不会自动获得新安装的 skill 和 MCP 工具。
+
+环境检查：
 
 ```bash
-python3 plugins/grok-companion/scripts/grb.py setup
-plugins/grok-companion/scripts/grb setup --json
+python3 plugins/grok-companion/scripts/grb.py setup --json
+python3 plugins/grok-companion/scripts/grb.py setup --probe-superx --json
 ```
-
-## 快速上手
-
-从仓库根目录运行：
-
-```bash
-python3 plugins/grok-companion/scripts/grb.py setup
-python3 plugins/grok-companion/scripts/grb.py ask "解释这个报错"
-python3 plugins/grok-companion/scripts/grb.py consult --include-git-context "这个方案稳吗？"
-python3 plugins/grok-companion/scripts/grb.py review --base main "审查当前分支"
-python3 plugins/grok-companion/scripts/grb.py adversarial-review --base main "挑战架构与风险模型"
-python3 plugins/grok-companion/scripts/grb.py research --background "调研可选方案并回报"
-python3 plugins/grok-companion/scripts/grb.py status
-python3 plugins/grok-companion/scripts/grb.py result
-python3 plugins/grok-companion/scripts/grb.py cancel <job-id>
-```
-
-从插件根目录运行：
-
-```bash
-python3 scripts/grb.py review --base main "review this branch"
-```
-
-常用选项：
-
-| 选项 | 说明 |
-|---|---|
-| `--base main` | 相对 base 的分支 diff，审查时推荐显式指定 |
-| `--include-git-context` | `ask`、`consult` 等非审查模式附带 git 上下文 |
-| `--background` | 后台运行并立即返回 `job_id` |
-| `--jobs-dir` / `GROK_COMPANION_JOBS_DIR` | 覆盖默认 job 目录 |
-| `--model` / `--effort` | 传给本地 `grok` |
-| `--format json` | 结构化输出 |
-
-未指定 `--base` 时，审查覆盖工作区和 index，也就是 unstaged + staged diff。
 
 ## Job 产物
 
-前台和后台任务都会写入持久化产物，默认在当前 git 仓库根目录：
+前台和后台任务都会写入持久化产物，默认位于当前 git 仓库根目录：
 
 ```text
 .grok-companion/jobs/<job-id>/
@@ -112,59 +167,50 @@ python3 scripts/grb.py review --base main "review this branch"
   raw.stderr
   result.md
   result.json
+  runner.stdout
+  runner.stderr
 ```
 
 - 默认目录：`<repo>/.grok-companion/jobs`
-- 可用 `--jobs-dir` 或环境变量 `GROK_COMPANION_JOBS_DIR` 覆盖
-- `.grok-companion/` 已在 `.gitignore` 中忽略，避免把本地任务产物提交进仓库
+- 可通过 `jobs_dir`、`--jobs-dir` 或 `GROK_COMPANION_JOBS_DIR` 覆盖
+- `.grok-companion/` 已被 `.gitignore` 忽略
+- `status`、`result` 和 `cancel` 使用磁盘产物，不依赖隐藏内存状态
+- macOS/Linux 取消整个 process group；Windows 使用 `taskkill /T`
 
-`status`、`result` 和 `cancel` 都依赖这些产物，不依赖隐藏内存状态。
+## 数据与安全边界
+
+- Companion 自身不保存 API key，使用本机 `grok login` 状态。
+- prompt、git diff、stdout/stderr 和结果会保存在本地 job 目录。
+- 这些内容同时会由 Grok CLI 发往 xAI，并受用户账号与 xAI 条款约束。
+- 不要提交或分享含密钥、客户数据或其他敏感内容的 job 目录。
+- `review` 是 prompt 级只读约束，不是 OS 沙箱。
+- `delegate` 使用完整本机 Grok CLI，并可能修改文件；只在用户明确授权后调用，之后仍需由 Codex 检查和验证。
 
 ## 架构
 
-三层：
-
-1. **Codex plugin 表面**：`.codex-plugin/plugin.json` 和 `skills/grok-companion/SKILL.md`
-2. **Companion 运行时**：`scripts/grb.py`、job 产物、后台进程、结果取回
-3. **能力适配**：本地 `grok` CLI、git diff/上下文、可选 `superx` 诊断
+1. **Plugin 表面**：`.codex-plugin/plugin.json`、`.mcp.json`、skill
+2. **MCP 适配层**：`scripts/mcp_server.py`
+3. **任务运行时**：`scripts/grb.py`、后台进程与 job artifacts
+4. **能力适配**：本机 Grok CLI、git context、可选 `superx` 诊断
 
 详见 [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)。
-
-## Codex 使用约定
-
-- 不要臆造进程内 Grok 工具；一律 shell 调用 `grb.py`。
-- 用户不需要立刻要答案的长任务用 `--background`。
-- 审查类命令是只读契约；落地修改与验证归 Codex。
-- 用 `status` 和 `result` 续看结果，避免重复开同一长任务。
-- 鉴权失败时先跑 `setup --json`，把真实错误报给用户。
 
 ## 测试
 
 ```bash
-python3 -m unittest tests/test_grb.py -v
+python3 -m unittest discover -s tests -v
 ```
 
-测试使用假 `grok` 二进制，不依赖真实登录。
+测试使用假 `grok`，覆盖 MCP 初始化、10 个工具的发现、后台 ask -> status -> result、进程树取消，以及快速完成 job 的竞态回归。
 
-## 仓库结构
+## v0.2 边界
 
-```text
-plugins/grok-companion/
-  .codex-plugin/plugin.json
-  scripts/grb
-  scripts/grb.py
-  skills/grok-companion/SKILL.md
-.agents/plugins/marketplace.json
-docs/ARCHITECTURE.md
-tests/test_grb.py
-```
-
-## v0 边界
-
-- 依赖本机已登录的 `grok` CLI。
-- `review` 和 `adversarial-review` 只读；Codex 仍然负责修改、验证和发布。
-- 后台 job 是本地 OS 进程，通过 pid 和 artifact 状态跟踪。
-- 当前是 Codex plugin，不实现 Claude Code slash commands。
+- 依赖本机已登录的 Grok CLI。
+- MCP 是 Codex 主路径，CLI 是同一运行时的完整回退入口。
+- 后台 job 是本地进程 + 磁盘产物，不是云端队列。
+- 当前没有 Codex sidebar terminal，也不是长期 REPL。
+- 当前没有自定义内联 UI；未来可以在不改变 job runtime 的情况下添加。
+- 精确 X/Twitter 仍由 `superx` 负责。
 
 ## License
 
