@@ -22,7 +22,7 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 DEFAULT_TIMEOUT = 1800
 DEFAULT_MAX_TURNS = 20
 DEFAULT_CONTEXT_LIMIT = 80000
@@ -115,6 +115,7 @@ def run_quiet(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> dic
         proc = subprocess.run(
             cmd,
             cwd=str(cwd) if cwd else None,
+            stdin=subprocess.DEVNULL,
             text=True,
             capture_output=True,
             timeout=timeout,
@@ -478,6 +479,7 @@ def run_job(job_dir: Path) -> int:
         proc = subprocess.run(
             cmd,
             cwd=meta.get("cwd") or None,
+            stdin=subprocess.DEVNULL,
             text=True,
             capture_output=True,
             timeout=int(meta.get("timeout") or DEFAULT_TIMEOUT),
@@ -563,7 +565,7 @@ def start_background(job_dir: Path) -> int:
     meta["runner_command"] = cmd
     save_meta(job_dir, meta)
     with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
-        proc = subprocess.Popen(cmd, stdout=out, stderr=err, start_new_session=True)
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=True)
     meta = load_meta(job_dir)
     if meta.get("status") in {"created", "starting", "running"}:
         meta["status"] = "running"

@@ -25,6 +25,9 @@ def make_fake_grok(tmp: Path) -> Path:
             import time
             from pathlib import Path
 
+            if os.environ.get("GROK_FAKE_READ_STDIN"):
+                sys.stdin.read()
+
             if len(sys.argv) > 1 and sys.argv[1] == "version":
                 print("grok fake 0.0.0")
                 raise SystemExit(0)

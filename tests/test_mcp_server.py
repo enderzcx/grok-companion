@@ -57,11 +57,13 @@ class McpClient:
 
 
 class McpServerTests(unittest.TestCase):
-    def make_client(self, tmp: Path, *, sleep: float | None = None) -> McpClient:
+    def make_client(self, tmp: Path, *, sleep: float | None = None, read_stdin: bool = False) -> McpClient:
         fake = make_fake_grok(tmp)
         env = {**os.environ, "GROK_BIN": str(fake)}
         if sleep is not None:
             env["GROK_FAKE_SLEEP"] = str(sleep)
+        if read_stdin:
+            env["GROK_FAKE_READ_STDIN"] = "1"
         return McpClient(env)
 
     def initialize(self, client: McpClient) -> None:
@@ -98,6 +100,21 @@ class McpServerTests(unittest.TestCase):
                         "grok_cancel",
                     },
                 )
+            finally:
+                client.close()
+
+    def test_setup_does_not_inherit_mcp_json_rpc_stdin(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            client = self.make_client(tmp, read_stdin=True)
+            try:
+                self.initialize(client)
+                response = client.request(
+                    "tools/call",
+                    {"name": "grok_setup", "arguments": {"cwd": str(tmp), "timeout": 2}},
+                )["result"]
+                self.assertFalse(response["isError"])
+                self.assertEqual(response["structuredContent"]["status"], "ok")
             finally:
                 client.close()
 

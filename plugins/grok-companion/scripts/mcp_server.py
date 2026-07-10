@@ -13,7 +13,7 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.2.1"
+SERVER_VERSION = "0.2.2"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
@@ -178,6 +178,7 @@ def invoke_grb(cwd: Path, args: list[str]) -> tuple[int, Any, str, str]:
     proc = subprocess.run(
         [sys.executable, str(GRB), *args],
         cwd=str(cwd),
+        stdin=subprocess.DEVNULL,
         text=True,
         capture_output=True,
     )
