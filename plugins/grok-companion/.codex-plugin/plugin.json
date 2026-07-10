@@ -1,0 +1,39 @@
+{
+  "name": "grok-companion",
+  "version": "0.1.0",
+  "description": "Use the local Grok CLI as a complete external collaborator for Codex: consult, review, research, delegate, and manage jobs.",
+  "author": {
+    "name": "Ender",
+    "url": "https://github.com/enderzcx"
+  },
+  "homepage": "https://github.com/enderzcx/grok-companion",
+  "repository": "https://github.com/enderzcx/grok-companion",
+  "license": "MIT",
+  "keywords": [
+    "grok",
+    "codex",
+    "review",
+    "research",
+    "agent"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Grok Companion",
+    "shortDescription": "Bring Grok into Codex as a second collaborator.",
+    "longDescription": "Grok Companion exposes a local grb bridge so Codex can ask Grok for reviews, adversarial reviews, research briefs, second opinions, and delegated long-running tasks with status/result/cancel artifacts.",
+    "developerName": "Ender",
+    "category": "Productivity",
+    "capabilities": [
+      "Consult",
+      "Review",
+      "Research",
+      "Delegate"
+    ],
+    "defaultPrompt": [
+      "Ask Grok to review my current diff.",
+      "Use Grok for an adversarial architecture review.",
+      "Delegate this research question to Grok."
+    ],
+    "brandColor": "#111827"
+  }
+}

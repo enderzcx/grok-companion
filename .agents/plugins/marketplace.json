@@ -1,0 +1,20 @@
+{
+  "name": "grok-companion",
+  "interface": {
+    "displayName": "Grok Companion"
+  },
+  "plugins": [
+    {
+      "name": "grok-companion",
+      "source": {
+        "source": "local",
+        "path": "./plugins/grok-companion"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

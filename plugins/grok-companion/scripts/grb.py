@@ -1,0 +1,732 @@
+#!/usr/bin/env python3
+"""Grok Companion bridge for local agents.
+
+This script is intentionally standalone: Codex can run it directly from the
+plugin skill, and tests can exercise it with a fake grok binary.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import signal
+import subprocess
+import sys
+import textwrap
+import uuid
+from pathlib import Path
+from shutil import which
+from typing import Any
+
+
+VERSION = "0.1.0"
+DEFAULT_TIMEOUT = 1800
+DEFAULT_MAX_TURNS = 20
+DEFAULT_CONTEXT_LIMIT = 80000
+JOB_ROOT_NAME = ".grok-companion"
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def repo_or_cwd() -> Path:
+    proc = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode == 0 and proc.stdout.strip():
+        return Path(proc.stdout.strip()).resolve()
+    return Path.cwd().resolve()
+
+
+def default_jobs_dir() -> Path:
+    env = os.environ.get("GROK_COMPANION_JOBS_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+    return repo_or_cwd() / JOB_ROOT_NAME / "jobs"
+
+
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def trim_text(value: str, limit: int = DEFAULT_CONTEXT_LIMIT) -> tuple[str, bool]:
+    if len(value) <= limit:
+        return value, False
+    head = limit // 2
+    tail = limit - head
+    return (
+        value[:head]
+        + "\n\n[... truncated by grok-companion; original chars="
+        + str(len(value))
+        + " ...]\n\n"
+        + value[-tail:],
+        True,
+    )
+
+
+def run_quiet(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return {"ok": False, "returncode": 127, "stdout": "", "stderr": f"missing binary: {cmd[0]}"}
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "returncode": 124,
+            "stdout": exc.stdout or "",
+            "stderr": exc.stderr or f"timed out after {timeout}s",
+        }
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout or "",
+        "stderr": proc.stderr or "",
+    }
+
+
+def git_capture(args: list[str], cwd: Path, timeout: int = 45) -> str:
+    result = run_quiet(["git", *args], cwd=cwd, timeout=timeout)
+    out = result["stdout"].strip()
+    err = result["stderr"].strip()
+    if result["ok"]:
+        return out
+    return f"[git {' '.join(args)} failed: {err or result['returncode']}]"
+
+
+def collect_git_context(cwd: Path, base: str | None, context_limit: int) -> dict[str, Any]:
+    inside = run_quiet(["git", "rev-parse", "--is-inside-work-tree"], cwd=cwd)
+    if not inside["ok"] or inside["stdout"].strip() != "true":
+        return {
+            "is_git_repo": False,
+            "cwd": str(cwd),
+            "summary": "Not inside a git repository.",
+            "diff": "",
+            "truncated": False,
+        }
+
+    root = Path(git_capture(["rev-parse", "--show-toplevel"], cwd) or cwd).resolve()
+    status = git_capture(["status", "--short"], root)
+    branch = git_capture(["branch", "--show-current"], root)
+    head = git_capture(["rev-parse", "--short", "HEAD"], root)
+
+    if base:
+        stat = git_capture(["diff", "--stat", f"{base}...HEAD"], root)
+        name_status = git_capture(["diff", "--name-status", f"{base}...HEAD"], root)
+        diff = git_capture(["diff", "--find-renames", f"{base}...HEAD"], root, timeout=120)
+        target = f"{base}...HEAD"
+    else:
+        stat_parts = [
+            "Unstaged diff:",
+            git_capture(["diff", "--stat"], root),
+            "",
+            "Staged diff:",
+            git_capture(["diff", "--cached", "--stat"], root),
+        ]
+        diff_parts = [
+            "## Unstaged diff",
+            git_capture(["diff", "--find-renames"], root, timeout=120),
+            "",
+            "## Staged diff",
+            git_capture(["diff", "--cached", "--find-renames"], root, timeout=120),
+        ]
+        stat = "\n".join(stat_parts).strip()
+        name_status = git_capture(["diff", "--name-status"], root) + "\n" + git_capture(["diff", "--cached", "--name-status"], root)
+        diff = "\n".join(diff_parts).strip()
+        target = "working tree + index"
+
+    trimmed_diff, truncated = trim_text(diff, context_limit)
+    return {
+        "is_git_repo": True,
+        "cwd": str(root),
+        "branch": branch,
+        "head": head,
+        "target": target,
+        "status_short": status,
+        "diff_stat": stat,
+        "name_status": name_status.strip(),
+        "diff": trimmed_diff,
+        "truncated": truncated,
+        "context_limit": context_limit,
+    }
+
+
+def markdown_block(title: str, body: str) -> str:
+    body = body.strip()
+    if not body:
+        body = "(empty)"
+    return f"## {title}\n\n{body}\n"
+
+
+def build_prompt(mode: str, task: str, args: argparse.Namespace, git_context: dict[str, Any] | None) -> str:
+    shared = textwrap.dedent(
+        f"""
+        You are Grok acting as a complete external AI collaborator for Codex.
+
+        Work mode: {mode}
+        Current date: {dt.date.today().isoformat()}
+
+        Rules:
+        - Be concrete, critical, and useful.
+        - Do not claim you changed files unless you actually did through tools.
+        - If evidence is missing, say exactly what is missing.
+        - Prefer concise Markdown with findings first when reviewing code.
+        - Preserve Chinese if the user task is Chinese; otherwise answer in the task language.
+        """
+    ).strip()
+
+    sections = [shared, markdown_block("Task", task)]
+
+    if git_context:
+        git_json = json.dumps(
+            {k: v for k, v in git_context.items() if k != "diff"},
+            ensure_ascii=False,
+            indent=2,
+        )
+        sections.append(markdown_block("Repository Context", f"```json\n{git_json}\n```"))
+        if git_context.get("diff"):
+            sections.append(markdown_block("Diff", f"```diff\n{git_context['diff']}\n```"))
+
+    if mode == "review":
+        sections.append(
+            markdown_block(
+                "Review Contract",
+                textwrap.dedent(
+                    """
+                    Run a read-only code review. Do not propose broad rewrites unless needed for a concrete risk.
+
+                    Output format:
+                    1. Findings first, ordered by severity.
+                    2. For each finding include severity, file/path and line if inferable, why it matters, and the smallest fix direction.
+                    3. Then list open questions or test gaps.
+                    4. End with a short overall risk call.
+
+                    Prioritize bugs, regressions, data loss, auth/security, concurrency, deploy/runtime breakage, and missing tests.
+                    """
+                ),
+            )
+        )
+    elif mode == "adversarial-review":
+        sections.append(
+            markdown_block(
+                "Adversarial Review Contract",
+                textwrap.dedent(
+                    """
+                    Challenge the implementation direction and assumptions, not only local bugs.
+                    Look for hidden coupling, bad abstractions, risky defaults, migration hazards,
+                    operational blind spots, rollback failure, and simpler alternatives.
+                    Keep it read-only and specific.
+                    """
+                ),
+            )
+        )
+    elif mode == "consult":
+        sections.append(
+            markdown_block(
+                "Consult Contract",
+                "Give a second opinion that Codex can use immediately. State your recommendation, tradeoffs, and what you would verify next.",
+            )
+        )
+    elif mode == "research":
+        sections.append(
+            markdown_block(
+                "Research Contract",
+                "Produce a source-aware research brief. Separate confirmed facts, inferences, and recommendations. Include URLs when you used web/X tools.",
+            )
+        )
+    elif mode == "delegate":
+        sections.append(
+            markdown_block(
+                "Delegate Contract",
+                "Take the task as far as you can. If you inspect or change files, summarize exact evidence and paths. If blocked, explain the blocker precisely.",
+            )
+        )
+    elif mode == "ask":
+        sections.append(markdown_block("Ask Contract", "Answer directly. Use tools only if the question requires them."))
+
+    return "\n\n".join(sections).strip() + "\n"
+
+
+def new_job_id(mode: str) -> str:
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{stamp}-{mode}-{uuid.uuid4().hex[:8]}"
+
+
+def load_meta(job_dir: Path) -> dict[str, Any]:
+    return json.loads((job_dir / "meta.json").read_text(encoding="utf-8"))
+
+
+def save_meta(job_dir: Path, meta: dict[str, Any]) -> None:
+    meta["updated_at"] = utc_now()
+    (job_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: dict[str, Any] | None = None) -> tuple[str, Path, dict[str, Any]]:
+    jobs_dir = Path(args.jobs_dir).expanduser().resolve() if getattr(args, "jobs_dir", None) else default_jobs_dir()
+    ensure_dir(jobs_dir)
+    job_id = new_job_id(mode)
+    job_dir = jobs_dir / job_id
+    ensure_dir(job_dir)
+    (job_dir / "prompt.md").write_text(prompt, encoding="utf-8")
+    if git_context is not None:
+        (job_dir / "context.json").write_text(json.dumps(git_context, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    meta = {
+        "job_id": job_id,
+        "version": VERSION,
+        "mode": mode,
+        "status": "created",
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
+        "cwd": str(Path.cwd().resolve()),
+        "jobs_dir": str(jobs_dir),
+        "job_dir": str(job_dir),
+        "grok_bin": args.grok_bin,
+        "model": getattr(args, "model", None),
+        "effort": getattr(args, "effort", None),
+        "reasoning_effort": getattr(args, "reasoning_effort", None),
+        "max_turns": getattr(args, "max_turns", DEFAULT_MAX_TURNS),
+        "timeout": getattr(args, "timeout", DEFAULT_TIMEOUT),
+        "tools": getattr(args, "tools", None),
+        "disallowed_tools": getattr(args, "disallowed_tools", None),
+        "disable_web_search": getattr(args, "disable_web_search", False),
+        "check": getattr(args, "check", False),
+        "best_of_n": getattr(args, "best_of_n", None),
+        "session_id": getattr(args, "session_id", None),
+        "format": getattr(args, "format", "md"),
+        "prompt_path": str(job_dir / "prompt.md"),
+        "result_path": str(job_dir / "result.md"),
+        "raw_stdout_path": str(job_dir / "raw.stdout"),
+        "raw_stderr_path": str(job_dir / "raw.stderr"),
+    }
+    save_meta(job_dir, meta)
+    return job_id, job_dir, meta
+
+
+def grok_command(meta: dict[str, Any]) -> list[str]:
+    cmd = [
+        meta.get("grok_bin") or "grok",
+        "--prompt-file",
+        meta["prompt_path"],
+        "--output-format",
+        "json",
+        "--max-turns",
+        str(meta.get("max_turns") or DEFAULT_MAX_TURNS),
+        "--no-auto-update",
+        "--always-approve",
+    ]
+    if meta.get("model"):
+        cmd.extend(["--model", meta["model"]])
+    if meta.get("effort"):
+        cmd.extend(["--effort", meta["effort"]])
+    if meta.get("reasoning_effort"):
+        cmd.extend(["--reasoning-effort", meta["reasoning_effort"]])
+    if meta.get("best_of_n"):
+        cmd.extend(["--best-of-n", str(meta["best_of_n"])])
+    if meta.get("session_id"):
+        cmd.extend(["--resume", meta["session_id"]])
+    if meta.get("tools") is not None:
+        cmd.extend(["--tools", meta["tools"]])
+    if meta.get("disallowed_tools"):
+        cmd.extend(["--disallowed-tools", meta["disallowed_tools"]])
+    if meta.get("disable_web_search"):
+        cmd.append("--disable-web-search")
+    if meta.get("check"):
+        cmd.append("--check")
+    return cmd
+
+
+def extract_text(stdout: str) -> tuple[str, Any]:
+    raw = stdout.strip()
+    if not raw:
+        return "", None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw, None
+    if isinstance(parsed, dict):
+        for key in ("text", "message", "content", "output"):
+            value = parsed.get(key)
+            if isinstance(value, str):
+                return value.strip(), parsed
+        return json.dumps(parsed, ensure_ascii=False, indent=2), parsed
+    return str(parsed), parsed
+
+
+def run_job(job_dir: Path) -> int:
+    meta = load_meta(job_dir)
+    meta["status"] = "running"
+    meta["pid"] = os.getpid()
+    meta["started_at"] = utc_now()
+    save_meta(job_dir, meta)
+
+    cmd = grok_command(meta)
+    meta["command"] = cmd
+    save_meta(job_dir, meta)
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=meta.get("cwd") or None,
+            text=True,
+            capture_output=True,
+            timeout=int(meta.get("timeout") or DEFAULT_TIMEOUT),
+        )
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        (job_dir / "raw.stdout").write_text(stdout, encoding="utf-8")
+        (job_dir / "raw.stderr").write_text(stderr, encoding="utf-8")
+        text, parsed = extract_text(stdout)
+        (job_dir / "result.md").write_text(text.strip() + ("\n" if text.strip() else ""), encoding="utf-8")
+        result_json = {
+            "job_id": meta["job_id"],
+            "status": "complete" if proc.returncode == 0 else "failed",
+            "returncode": proc.returncode,
+            "text": text,
+            "parsed": parsed,
+            "stderr_tail": stderr[-4000:],
+        }
+        (job_dir / "result.json").write_text(json.dumps(result_json, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        meta["status"] = "complete" if proc.returncode == 0 else "failed"
+        meta["returncode"] = proc.returncode
+        meta["finished_at"] = utc_now()
+        meta.pop("pid", None)
+        save_meta(job_dir, meta)
+        return proc.returncode
+    except FileNotFoundError:
+        message = f"grok binary not found: {cmd[0]}"
+        (job_dir / "raw.stderr").write_text(message + "\n", encoding="utf-8")
+        (job_dir / "result.md").write_text("", encoding="utf-8")
+        meta["status"] = "failed"
+        meta["returncode"] = 127
+        meta["error"] = message
+        meta["finished_at"] = utc_now()
+        meta.pop("pid", None)
+        save_meta(job_dir, meta)
+        return 127
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        (job_dir / "raw.stdout").write_text(stdout, encoding="utf-8")
+        (job_dir / "raw.stderr").write_text(stderr + f"\nTimed out after {meta.get('timeout')}s\n", encoding="utf-8")
+        text, parsed = extract_text(stdout)
+        (job_dir / "result.md").write_text(text.strip() + ("\n" if text.strip() else ""), encoding="utf-8")
+        meta["status"] = "timeout"
+        meta["returncode"] = 124
+        meta["finished_at"] = utc_now()
+        meta.pop("pid", None)
+        save_meta(job_dir, meta)
+        (job_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "job_id": meta["job_id"],
+                    "status": "timeout",
+                    "returncode": 124,
+                    "text": text,
+                    "parsed": parsed,
+                    "stderr_tail": stderr[-4000:],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return 124
+
+
+def start_background(job_dir: Path) -> int:
+    stdout_path = job_dir / "runner.stdout"
+    stderr_path = job_dir / "runner.stderr"
+    cmd = [sys.executable, str(Path(__file__).resolve()), "_run-job", str(job_dir)]
+    with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
+        proc = subprocess.Popen(cmd, stdout=out, stderr=err, start_new_session=True)
+    meta = load_meta(job_dir)
+    meta["status"] = "running"
+    meta["pid"] = proc.pid
+    meta["runner_command"] = cmd
+    save_meta(job_dir, meta)
+    return proc.pid
+
+
+def resolve_job(jobs_dir: Path, job_id: str | None) -> Path:
+    ensure_dir(jobs_dir)
+    if job_id:
+        matches = sorted(jobs_dir.glob(f"{job_id}*"))
+        if len(matches) == 1:
+            return matches[0]
+        direct = jobs_dir / job_id
+        if direct.exists():
+            return direct
+        raise SystemExit(f"Job not found or ambiguous: {job_id}")
+    jobs = sorted([p for p in jobs_dir.iterdir() if (p / "meta.json").exists()])
+    if not jobs:
+        raise SystemExit(f"No jobs found under {jobs_dir}")
+    return jobs[-1]
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def command_setup(args: argparse.Namespace) -> int:
+    grok_path = which(args.grok_bin) if not os.path.isabs(args.grok_bin) else args.grok_bin
+    report: dict[str, Any] = {
+        "status": "ok",
+        "version": VERSION,
+        "grok_bin": args.grok_bin,
+        "grok_path": grok_path,
+        "jobs_dir": str(Path(args.jobs_dir).expanduser().resolve() if args.jobs_dir else default_jobs_dir()),
+        "superx_path": which("superx"),
+        "checks": {},
+    }
+    if not grok_path:
+        report["status"] = "degraded"
+        report["checks"]["grok"] = {"ok": False, "error": "grok binary not found"}
+    else:
+        report["checks"]["grok_version"] = run_quiet([args.grok_bin, "version"], timeout=args.timeout)
+        report["checks"]["grok_models"] = run_quiet([args.grok_bin, "models"], timeout=args.timeout)
+
+    if args.probe_superx:
+        if which("superx"):
+            report["checks"]["superx_doctor"] = run_quiet(["superx", "doctor", "--format", "json", "--no-update-check"], timeout=args.timeout)
+        else:
+            report["checks"]["superx_doctor"] = {"ok": False, "returncode": 127, "stdout": "", "stderr": "superx not found"}
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(f"grok-companion setup: {report['status']}")
+        print(f"grok: {grok_path or 'missing'}")
+        print(f"jobs: {report['jobs_dir']}")
+        if report.get("superx_path"):
+            print(f"superx: {report['superx_path']}")
+        for name, check in report["checks"].items():
+            ok = check.get("ok") if isinstance(check, dict) else False
+            print(f"{name}: {'ok' if ok else 'failed'}")
+            if isinstance(check, dict) and check.get("stderr"):
+                print(textwrap.indent(check["stderr"].strip()[-600:], "  "))
+    return 0 if report["status"] == "ok" else 1
+
+
+def execute_mode(args: argparse.Namespace, mode: str) -> int:
+    task = " ".join(args.task).strip()
+    if not task:
+        raise SystemExit(f"{mode} requires a task/prompt")
+    git_context = None
+    if mode in {"review", "adversarial-review"} or getattr(args, "include_git_context", False):
+        git_context = collect_git_context(Path.cwd().resolve(), getattr(args, "base", None), getattr(args, "context_limit", DEFAULT_CONTEXT_LIMIT))
+    prompt = build_prompt(mode, task, args, git_context)
+    job_id, job_dir, _meta = create_job(mode, prompt, args, git_context)
+    if getattr(args, "background", False):
+        pid = start_background(job_dir)
+        print(json.dumps({"job_id": job_id, "status": "running", "pid": pid, "job_dir": str(job_dir)}, ensure_ascii=False, indent=2))
+        return 0
+    code = run_job(job_dir)
+    result_path = job_dir / "result.md"
+    text = result_path.read_text(encoding="utf-8") if result_path.exists() else ""
+    if args.format == "json":
+        result_json_path = job_dir / "result.json"
+        payload = json.loads(result_json_path.read_text(encoding="utf-8")) if result_json_path.exists() else {"text": text}
+        payload["job_dir"] = str(job_dir)
+        payload["job_id"] = job_id
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.path_only:
+        print(result_path)
+    else:
+        if text:
+            print(text)
+        else:
+            stderr_path = job_dir / "raw.stderr"
+            if stderr_path.exists():
+                print(stderr_path.read_text(encoding="utf-8")[-2000:], file=sys.stderr)
+    return code
+
+
+def command_status(args: argparse.Namespace) -> int:
+    jobs_dir = Path(args.jobs_dir).expanduser().resolve() if args.jobs_dir else default_jobs_dir()
+    ensure_dir(jobs_dir)
+    jobs = sorted([p for p in jobs_dir.iterdir() if (p / "meta.json").exists()])
+    if args.job_id:
+        jobs = [resolve_job(jobs_dir, args.job_id)]
+    else:
+        jobs = jobs[-args.limit :]
+    rows = []
+    for job in jobs:
+        meta = load_meta(job)
+        pid = meta.get("pid")
+        if meta.get("status") == "running" and pid and not pid_alive(int(pid)):
+            meta["status"] = "unknown"
+            meta["warning"] = "pid is no longer alive but no final result was recorded"
+            save_meta(job, meta)
+        rows.append(meta)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+    else:
+        if not rows:
+            print(f"No jobs under {jobs_dir}")
+            return 0
+        for meta in rows:
+            print(f"{meta['job_id']}  {meta.get('status')}  {meta.get('mode')}  {meta.get('updated_at')}")
+            print(f"  {meta.get('job_dir')}")
+    return 0
+
+
+def command_result(args: argparse.Namespace) -> int:
+    jobs_dir = Path(args.jobs_dir).expanduser().resolve() if args.jobs_dir else default_jobs_dir()
+    job_dir = resolve_job(jobs_dir, args.job_id)
+    if args.json:
+        result_path = job_dir / "result.json"
+        if result_path.exists():
+            print(result_path.read_text(encoding="utf-8"), end="")
+        else:
+            print(json.dumps(load_meta(job_dir), ensure_ascii=False, indent=2))
+        return 0
+    result_path = job_dir / "result.md"
+    if not result_path.exists():
+        raise SystemExit(f"No result yet for {job_dir.name}")
+    if args.path_only:
+        print(result_path)
+    else:
+        print(result_path.read_text(encoding="utf-8"), end="")
+    return 0
+
+
+def command_cancel(args: argparse.Namespace) -> int:
+    jobs_dir = Path(args.jobs_dir).expanduser().resolve() if args.jobs_dir else default_jobs_dir()
+    job_dir = resolve_job(jobs_dir, args.job_id)
+    meta = load_meta(job_dir)
+    pid = meta.get("pid")
+    if not pid:
+        print(f"Job {meta['job_id']} has no running pid; status={meta.get('status')}")
+        return 1
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+        meta["status"] = "cancelled"
+        meta["cancelled_at"] = utc_now()
+        meta.pop("pid", None)
+        save_meta(job_dir, meta)
+        print(f"Cancelled {meta['job_id']} (pid {pid})")
+        return 0
+    except ProcessLookupError:
+        meta["status"] = "unknown"
+        meta["warning"] = "pid not found during cancel"
+        meta.pop("pid", None)
+        save_meta(job_dir, meta)
+        print(f"Process already gone for {meta['job_id']}")
+        return 1
+
+
+def add_runtime_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--grok-bin", default=os.environ.get("GROK_BIN", "grok"), help="Grok CLI binary (default: grok or GROK_BIN)")
+    parser.add_argument("--jobs-dir", help="Job artifact directory (default: repo/.grok-companion/jobs)")
+    parser.add_argument("--model", help="Grok model id")
+    parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="Grok reasoning effort alias")
+    parser.add_argument("--reasoning-effort", help="Explicit reasoning effort")
+    parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--tools", help="Comma-separated Grok tools allowlist")
+    parser.add_argument("--disallowed-tools", help="Comma-separated Grok tools denylist")
+    parser.add_argument("--disable-web-search", action="store_true")
+    parser.add_argument("--check", action="store_true", help="Ask Grok to self-verify before final output")
+    parser.add_argument("--best-of-n", type=int, help="Use Grok best-of-N for the primary run")
+    parser.add_argument("--session-id", help="Resume an existing Grok session id")
+    parser.add_argument("--background", action="store_true", help="Start job and return immediately")
+    parser.add_argument("--wait", action="store_true", help="Run foreground; kept for compatibility and readability")
+    parser.add_argument("--format", choices=["md", "json"], default="md")
+    parser.add_argument("--path-only", action="store_true", help="Print only result.md path after foreground completion")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="grb",
+        description="Grok Companion: a local Grok collaborator bridge for Codex and other agents.",
+    )
+    parser.add_argument("--version", action="version", version=f"grok-companion {VERSION}")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_setup = sub.add_parser("setup", help="Check Grok CLI, models, job directory, and optional superx")
+    p_setup.add_argument("--grok-bin", default=os.environ.get("GROK_BIN", "grok"))
+    p_setup.add_argument("--jobs-dir")
+    p_setup.add_argument("--timeout", type=int, default=30)
+    p_setup.add_argument("--probe-superx", action="store_true")
+    p_setup.add_argument("--json", action="store_true")
+    p_setup.set_defaults(func=command_setup)
+
+    for name, help_text in [
+        ("ask", "Ask Grok a direct question"),
+        ("consult", "Ask Grok for a second opinion"),
+        ("research", "Ask Grok for a research brief"),
+        ("delegate", "Delegate a bounded task to Grok"),
+    ]:
+        p = sub.add_parser(name, help=help_text)
+        add_runtime_flags(p)
+        p.add_argument("--include-git-context", action="store_true", help="Include git status/diff context")
+        p.add_argument("--base", help="Optional git base ref when including git context")
+        p.add_argument("--context-limit", type=int, default=DEFAULT_CONTEXT_LIMIT)
+        p.add_argument("task", nargs=argparse.REMAINDER)
+        p.set_defaults(func=lambda args, mode=name: execute_mode(args, mode))
+
+    for name, help_text in [
+        ("review", "Read-only Grok code review"),
+        ("adversarial-review", "Read-only Grok challenge review"),
+    ]:
+        p = sub.add_parser(name, help=help_text)
+        add_runtime_flags(p)
+        p.add_argument("--base", help="Review branch diff against base ref, e.g. main")
+        p.add_argument("--context-limit", type=int, default=DEFAULT_CONTEXT_LIMIT)
+        p.add_argument("task", nargs=argparse.REMAINDER)
+        p.set_defaults(func=lambda args, mode=name: execute_mode(args, mode))
+
+    p_status = sub.add_parser("status", help="Show running and recent jobs")
+    p_status.add_argument("job_id", nargs="?")
+    p_status.add_argument("--jobs-dir")
+    p_status.add_argument("--limit", type=int, default=10)
+    p_status.add_argument("--json", action="store_true")
+    p_status.set_defaults(func=command_status)
+
+    p_result = sub.add_parser("result", help="Print a finished job result")
+    p_result.add_argument("job_id", nargs="?")
+    p_result.add_argument("--jobs-dir")
+    p_result.add_argument("--json", action="store_true")
+    p_result.add_argument("--path-only", action="store_true")
+    p_result.set_defaults(func=command_result)
+
+    p_cancel = sub.add_parser("cancel", help="Cancel a running background job")
+    p_cancel.add_argument("job_id", nargs="?")
+    p_cancel.add_argument("--jobs-dir")
+    p_cancel.set_defaults(func=command_cancel)
+
+    p_run = sub.add_parser("_run-job", help=argparse.SUPPRESS)
+    p_run.add_argument("job_dir")
+    p_run.set_defaults(func=lambda args: run_job(Path(args.job_dir).expanduser().resolve()))
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return int(args.func(args) or 0)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
