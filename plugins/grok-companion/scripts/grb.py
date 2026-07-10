@@ -22,7 +22,7 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 DEFAULT_TIMEOUT = 1800
 DEFAULT_MAX_TURNS = 20
 DEFAULT_CONTEXT_LIMIT = 80000
@@ -122,11 +122,17 @@ def run_quiet(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> dic
     except FileNotFoundError:
         return {"ok": False, "returncode": 127, "stdout": "", "stderr": f"missing binary: {cmd[0]}"}
     except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
         return {
             "ok": False,
             "returncode": 124,
-            "stdout": exc.stdout or "",
-            "stderr": exc.stderr or f"timed out after {timeout}s",
+            "stdout": stdout,
+            "stderr": stderr or f"timed out after {timeout}s",
         }
     return {
         "ok": proc.returncode == 0,

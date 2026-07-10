@@ -88,6 +88,38 @@ class GrbTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 1)
             self.assertEqual(json.loads(proc.stdout)["status"], "degraded")
 
+    def test_setup_serializes_partial_bytes_after_timeout(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            fake = tmp / "slow-grok"
+            fake.write_text(
+                "#!/usr/bin/env python3\nimport os, time\nos.write(1, b'partial output')\ntime.sleep(2)\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(GRB),
+                    "setup",
+                    "--json",
+                    "--timeout",
+                    "1",
+                    "--jobs-dir",
+                    str(tmp / "jobs"),
+                ],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                env={**os.environ, "GROK_BIN": str(fake)},
+            )
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["status"], "degraded")
+            self.assertEqual(payload["checks"]["grok_version"]["stdout"], "partial output")
+            self.assertIsInstance(payload["checks"]["grok_models"]["stderr"], str)
+
     def test_ask_creates_result_artifacts(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
