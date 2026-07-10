@@ -13,7 +13,7 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.2.2"
+SERVER_VERSION = "0.2.3"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
@@ -328,7 +328,10 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                 "id": request_id,
                 "result": {
                     "protocolVersion": negotiated,
-                    "capabilities": {"tools": {"listChanged": False}},
+                    "capabilities": {
+                        "tools": {"listChanged": False},
+                        "resources": {"subscribe": False, "listChanged": False},
+                    },
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                     "instructions": (
                         "Grok launch tools always use background jobs. Pass the current workspace as cwd, "
@@ -340,6 +343,10 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
             return {"id": request_id, "result": {}}
         if method == "tools/list":
             return {"id": request_id, "result": {"tools": TOOLS}}
+        if method == "resources/list":
+            return {"id": request_id, "result": {"resources": []}}
+        if method == "resources/templates/list":
+            return {"id": request_id, "result": {"resourceTemplates": []}}
         if method == "tools/call":
             params = message.get("params") or {}
             if not isinstance(params, dict):

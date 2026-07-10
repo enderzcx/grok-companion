@@ -22,7 +22,7 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 DEFAULT_TIMEOUT = 1800
 DEFAULT_MAX_TURNS = 20
 DEFAULT_CONTEXT_LIMIT = 80000

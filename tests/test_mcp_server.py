@@ -14,6 +14,7 @@ from test_grb import make_fake_grok
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "plugins" / "grok-companion" / "scripts" / "mcp_server.py"
+MCP_CONFIG = ROOT / "plugins" / "grok-companion" / ".mcp.json"
 
 
 class McpClient:
@@ -100,8 +101,19 @@ class McpServerTests(unittest.TestCase):
                         "grok_cancel",
                     },
                 )
+                resources = client.request("resources/list")
+                self.assertEqual(resources["result"]["resources"], [])
             finally:
                 client.close()
+
+    def test_plugin_forwards_local_proxy_environment(self):
+        config = json.loads(MCP_CONFIG.read_text(encoding="utf-8"))
+        env_vars = config["mcpServers"]["grok-companion"]["env_vars"]
+        self.assertIn("HTTP_PROXY", env_vars)
+        self.assertIn("HTTPS_PROXY", env_vars)
+        self.assertIn("ALL_PROXY", env_vars)
+        self.assertIn("NO_PROXY", env_vars)
+        self.assertIn("GROK_BIN", env_vars)
 
     def test_setup_does_not_inherit_mcp_json_rpc_stdin(self):
         with tempfile.TemporaryDirectory() as td:

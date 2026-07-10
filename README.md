@@ -49,6 +49,8 @@ v0.1 需要 Codex 通过 shell 调用 `grb.py`。v0.2 在插件中注册了本�
 
 MCP server 仅使用 Python 标准库，不需要额外安装 pip 包。
 
+插件会通过 Codex `env_vars` 白名单透传常见代理、证书、`GROK_BIN` 和 jobs-dir 环境变量，避免本机 Grok 能联网、MCP 子进程却丢失代理配置。
+
 ## 默认后台任务
 
 所有启动型 MCP 工具都固定使用后台 job：

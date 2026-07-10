@@ -49,6 +49,8 @@ v0.1 required Codex to shell out to `grb.py`. v0.2 registers a local stdio MCP s
 
 The MCP server uses only the Python standard library and needs no additional pip packages.
 
+The plugin uses Codex's `env_vars` allowlist to forward common proxy, certificate, `GROK_BIN`, and jobs-directory variables, so the MCP child does not silently lose networking that works in the user's shell.
+
 ## Background By Default
 
 All MCP launch tools always use background jobs:
