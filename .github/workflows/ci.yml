@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile
+        run: python -m py_compile plugins/grok-companion/scripts/grb.py plugins/grok-companion/scripts/mcp_server.py scripts/check_release.py
+      - name: Release consistency
+        run: python scripts/check_release.py
+      - name: Installed skill SOP contract
+        run: |
+          python plugins/grok-companion/skills/grok-companion/scripts/skill_registry.py list
+          python plugins/grok-companion/skills/grok-companion/scripts/skill_registry.py read references/routing.md
+          python plugins/grok-companion/skills/grok-companion/scripts/skill_registry.py validate
+      - name: Tests
+        run: python -m unittest discover -s tests -v

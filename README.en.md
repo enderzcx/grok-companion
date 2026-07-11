@@ -4,7 +4,7 @@
 
 Use the local **Grok CLI** as a full external collaborator inside **Codex**.
 
-Grok Companion v0.2 is a Codex plugin with native MCP tools. Codex can call `grok_*` tools for consultation, read-only review, adversarial review, research, delegation, and durable background job management.
+Grok Companion v0.3.0 is a Codex plugin with 13 native MCP tools for consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with bounded waiting.
 
 > **This is not a Codex sidebar terminal.**
 >
@@ -19,19 +19,22 @@ The product direction is inspired by [openai/codex-plugin-cc](https://github.com
 | Environment check | `grok_setup` | `setup` | Check `grok`, visible models, jobs, and optional `superx` |
 | Ask | `grok_ask` | `ask` | General questions |
 | Consult | `grok_consult` | `consult` | Second opinions and tradeoffs |
-| Code review | `grok_review` | `review` | Findings only; no edits |
-| Adversarial review | `grok_adversarial_review` | `adversarial-review` | Challenge assumptions and failure modes |
+| Code review | `grok_review` | `review` | Structured findings; read-only contract; no edits |
+| Adversarial review | `grok_adversarial_review` | `adversarial-review` | Same schema; challenges assumptions and failure modes |
 | Research | `grok_research` | `research` | General source-aware research |
 | Delegate | `grok_delegate` | `delegate` | Full local Grok CLI; may use tools or edit files |
-| Status | `grok_status` | `status` | Inspect recent or specific jobs |
+| Continue | `grok_continue` | `continue` | Resume by session, companion job, or latest resumable job |
+| Session discovery | `grok_sessions` | `sessions` | List or search local Grok CLI sessions |
+| Status | `grok_status` | `status` | Inspect jobs without blocking |
+| Bounded wait | `grok_wait` | `wait` | Wait once for a terminal result instead of tight polling |
 | Result | `grok_result` | `result` | Read stored results |
 | Cancel | `grok_cancel` | `cancel` | Terminate the runner and its children |
 
-`review` and `adversarial-review` are read-only prompt contracts. Codex still owns edits, tests, commits, and shipping.
+`review` and `adversarial-review` are prompt-level read-only contracts, not an OS sandbox. Codex still owns edits, tests, commits, and shipping; never delegate fixes merely because a review returned findings.
 
 ## Why MCP
 
-v0.1 required Codex to shell out to `grb.py`. v0.2 registers a local stdio MCP server so Codex receives first-class `grok_*` tools:
+v0.1 required Codex to shell out to `grb.py`. Since v0.2, the plugin registers a local stdio MCP server so Codex receives first-class `grok_*` tools:
 
 ```json
 {
@@ -56,24 +59,40 @@ The plugin uses Codex's `env_vars` allowlist to forward common proxy, certificat
 All MCP launch tools always use background jobs:
 
 ```text
-Codex calls grok_review / grok_research / ...
+Codex calls grok_review / grok_research / grok_continue / ...
         -> receives job_id immediately
         -> local grok runs in the background
-        -> grok_status reports progress
-        -> grok_result returns the stored answer
+        -> grok_wait performs one bounded wait
+        -> returns the stored result when terminal
 ```
 
-This avoids treating a 25-second-to-multi-minute Grok call as a failed Codex wait and keeps status or cancellation available. Use the CLI fallback when foreground waiting is required.
+This avoids treating a 25-second-to-multi-minute Grok call as a failed Codex wait and avoids tight `grok_status` polling. Use `grok_status` for non-blocking inspection and the CLI fallback for foreground execution.
 
 Typical flow:
 
 1. Run `grok_setup` when environment or authentication needs checking.
 2. Launch `grok_review`, `grok_consult`, or another task and keep the returned `job_id`.
-3. Call `grok_status` until the job reaches a terminal state.
-4. Call `grok_result` for the answer.
+3. Call `grok_wait` once, with a bounded timeout.
+4. If it returns `completed: false`, preserve the same `job_id` instead of silently restarting.
 5. Use `grok_cancel` to stop early.
 
 Every MCP call requires the absolute current workspace path as `cwd`. Keep `cwd` and an optional `jobs_dir` consistent for the same job.
+
+## Structured Reviews
+
+`grok_review` and `grok_adversarial_review` constrain output with Grok CLI `--json-schema`. The public schema is [`plugins/grok-companion/schemas/review-output.schema.json`](./plugins/grok-companion/schemas/review-output.schema.json).
+
+Required top-level fields are `verdict`, `summary`, `findings`, and `next_steps`. Each finding carries severity, title, body, file, line range, confidence, and a recommendation. Valid JSON is rendered to `result.md` and preserved under `result.json` as `review`; malformed output fails the job with a stored `contract_error`.
+
+## Session Discovery And Continue
+
+Grok `sessionId` values are stored in result and job metadata. `grok_sessions` wraps local `grok sessions list|search`; `grok_continue` resumes in this order:
+
+1. Explicit `session_id`.
+2. Session recorded by a companion `job_id`.
+3. Latest companion job with a resumable session.
+
+When no session can be recovered, the command fails explicitly instead of silently starting a fresh conversation.
 
 ## Use In Codex
 
@@ -84,6 +103,7 @@ Ask Grok to review my current changes.
 Use Grok for an adversarial review of this caching design.
 Have Grok research these three options in the background and report back.
 Delegate this bounded implementation task to Grok, then verify its work.
+Continue the previous Grok session and dig into the second risk.
 ```
 
 Codex prefers the loaded `grok_*` MCP tools. If the MCP server is unavailable, the bundled skill falls back to `grb.py`.
@@ -99,6 +119,9 @@ python3 plugins/grok-companion/scripts/grb.py consult --include-git-context "Is 
 python3 plugins/grok-companion/scripts/grb.py review --base main "Review this branch"
 python3 plugins/grok-companion/scripts/grb.py adversarial-review --base main "Challenge the architecture"
 python3 plugins/grok-companion/scripts/grb.py research --background "Research the options"
+python3 plugins/grok-companion/scripts/grb.py wait <job-id> --timeout 120 --json
+python3 plugins/grok-companion/scripts/grb.py sessions --json
+python3 plugins/grok-companion/scripts/grb.py continue --background --job-id <job-id> "Dig deeper"
 python3 plugins/grok-companion/scripts/grb.py status
 python3 plugins/grok-companion/scripts/grb.py result
 python3 plugins/grok-companion/scripts/grb.py cancel <job-id>
@@ -110,7 +133,9 @@ Useful flags include `--base`, `--include-git-context`, `--jobs-dir`, `--model`,
 
 Without `--base`, review covers the working tree plus index: unstaged, staged, and untracked text files within the context budget.
 
-## Relationship To superx
+## Routing Boundaries
+
+The skill triggers only when the user explicitly asks for Grok collaboration or is already managing a Grok Companion job. Generic review or research that does not name Grok, another named AI collaborator, and requests for a sidebar terminal are outside this plugin.
 
 | | superx | grok-companion |
 |---|---|---|
@@ -197,21 +222,26 @@ Foreground and background tasks write durable artifacts under the current git re
 
 See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
 
-## Tests
+## Tests And CI
 
 ```bash
+python3 -m py_compile plugins/grok-companion/scripts/grb.py plugins/grok-companion/scripts/mcp_server.py scripts/check_release.py
+python3 scripts/check_release.py
 python3 -m unittest discover -s tests -v
 ```
 
-Tests use a fake `grok` binary and cover MCP initialization, discovery of all ten tools, background ask -> status -> result, process-tree cancellation, and the fast-completion race regression.
+Tests use a fake `grok` binary and cover all 13 MCP tools, structured review, session continuation, launch -> wait/result, process-tree cancellation, and race regressions. GitHub Actions runs compile, release consistency, and the full suite on Python 3.9 and 3.12.
 
-## Public v0.2 Boundaries
+## Public v0.3 Boundaries
 
 - Requires a working local Grok CLI login.
 - MCP is the primary Codex path; CLI is a full fallback over the same runtime.
 - Background jobs are local processes plus disk artifacts, not a cloud queue.
 - There is no Codex sidebar terminal or persistent REPL.
 - There is no custom inline UI yet; one can be added later without replacing the job runtime.
+- Review read-only is a prompt contract, not OS-enforced isolation.
+- Session continuation depends on locally resumable Grok sessions and is not a cross-machine transfer guarantee.
+- Generic review or research that does not name Grok is not auto-routed here.
 - Exact X/Twitter work remains the responsibility of `superx`.
 
 ## License

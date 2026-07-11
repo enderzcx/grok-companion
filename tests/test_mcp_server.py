@@ -58,13 +58,21 @@ class McpClient:
 
 
 class McpServerTests(unittest.TestCase):
-    def make_client(self, tmp: Path, *, sleep: float | None = None, read_stdin: bool = False) -> McpClient:
+    def make_client(
+        self,
+        tmp: Path,
+        *,
+        sleep: float | None = None,
+        read_stdin: bool = False,
+        extra_env: dict[str, str] | None = None,
+    ) -> McpClient:
         fake = make_fake_grok(tmp)
         env = {**os.environ, "GROK_BIN": str(fake)}
         if sleep is not None:
             env["GROK_FAKE_SLEEP"] = str(sleep)
         if read_stdin:
             env["GROK_FAKE_READ_STDIN"] = "1"
+        env.update(extra_env or {})
         return McpClient(env)
 
     def initialize(self, client: McpClient) -> None:
@@ -96,7 +104,10 @@ class McpServerTests(unittest.TestCase):
                         "grok_adversarial_review",
                         "grok_research",
                         "grok_delegate",
+                        "grok_continue",
+                        "grok_sessions",
                         "grok_status",
+                        "grok_wait",
                         "grok_result",
                         "grok_cancel",
                     },
@@ -147,22 +158,22 @@ class McpServerTests(unittest.TestCase):
                 self.assertFalse(launch["isError"])
                 job_id = launch["structuredContent"]["job_id"]
 
-                status = None
-                deadline = time.time() + 5
-                while time.time() < deadline:
-                    status_response = client.request(
-                        "tools/call",
-                        {
-                            "name": "grok_status",
-                            "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "job_id": job_id},
+                wait_response = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_wait",
+                        "arguments": {
+                            "cwd": str(tmp),
+                            "jobs_dir": str(jobs),
+                            "job_id": job_id,
+                            "timeout": 5,
+                            "poll_interval_ms": 100,
                         },
-                    )["result"]
-                    self.assertFalse(status_response["isError"])
-                    status = status_response["structuredContent"]["jobs"][0]["status"]
-                    if status == "complete":
-                        break
-                    time.sleep(0.05)
-                self.assertEqual(status, "complete")
+                    },
+                )["result"]
+                self.assertFalse(wait_response["isError"])
+                self.assertTrue(wait_response["structuredContent"]["completed"])
+                self.assertEqual(wait_response["structuredContent"]["status"], "complete")
 
                 result = client.request(
                     "tools/call",
@@ -176,6 +187,132 @@ class McpServerTests(unittest.TestCase):
                 prompt = (jobs / job_id / "prompt.md").read_text(encoding="utf-8")
                 self.assertIn("-hello from MCP", prompt)
                 self.assertNotIn("## Task\n\n-- -hello", prompt)
+            finally:
+                client.close()
+
+    def test_wait_marks_failed_job_as_mcp_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            client = self.make_client(tmp, extra_env={"GROK_FAKE_REVIEW_MODE": "invalid"})
+            try:
+                self.initialize(client)
+                launch = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_review",
+                        "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "task": "invalid"},
+                    },
+                )["result"]["structuredContent"]
+                waited = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_wait",
+                        "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "job_id": launch["job_id"], "timeout": 5},
+                    },
+                )["result"]
+                self.assertTrue(waited["isError"])
+                self.assertTrue(waited["structuredContent"]["completed"])
+                self.assertFalse(waited["structuredContent"]["job_ok"])
+                self.assertEqual(waited["structuredContent"]["status"], "failed")
+            finally:
+                client.close()
+
+    def test_cancel_can_run_while_wait_request_is_in_flight(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            client = self.make_client(tmp, sleep=10)
+            try:
+                self.initialize(client)
+                launch = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_ask",
+                        "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "task": "slow"},
+                    },
+                )["result"]["structuredContent"]
+                assert client.proc.stdin is not None
+                assert client.proc.stdout is not None
+                wait_message = {
+                    "jsonrpc": "2.0",
+                    "id": 1001,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "grok_wait",
+                        "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "job_id": launch["job_id"], "timeout": 5},
+                    },
+                }
+                cancel_message = {
+                    "jsonrpc": "2.0",
+                    "id": 1002,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "grok_cancel",
+                        "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "job_id": launch["job_id"]},
+                    },
+                }
+                client.proc.stdin.write(json.dumps(wait_message) + "\n")
+                client.proc.stdin.write(json.dumps(cancel_message) + "\n")
+                client.proc.stdin.flush()
+                responses = {}
+                deadline = time.time() + 8
+                while len(responses) < 2 and time.time() < deadline:
+                    response = json.loads(client.proc.stdout.readline())
+                    responses[response["id"]] = response
+                self.assertIn(1001, responses)
+                self.assertIn(1002, responses)
+                self.assertFalse(responses[1002]["result"]["isError"])
+                self.assertTrue(responses[1002]["result"]["structuredContent"]["cancelled"])
+                self.assertEqual(responses[1001]["result"]["structuredContent"]["status"], "cancelled")
+            finally:
+                client.close()
+
+    def test_sessions_and_continue_are_native_tools(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            client = self.make_client(tmp)
+            try:
+                self.initialize(client)
+                sessions = client.request(
+                    "tools/call",
+                    {"name": "grok_sessions", "arguments": {"cwd": str(tmp), "limit": 2}},
+                )["result"]
+                self.assertFalse(sessions["isError"])
+                self.assertEqual(
+                    sessions["structuredContent"]["session_ids"],
+                    ["11111111-1111-4111-8111-111111111111"],
+                )
+
+                first = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_ask",
+                        "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "task": "first"},
+                    },
+                )["result"]["structuredContent"]
+                client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_wait",
+                        "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "job_id": first["job_id"], "timeout": 5},
+                    },
+                )
+                continued = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_continue",
+                        "arguments": {
+                            "cwd": str(tmp),
+                            "jobs_dir": str(jobs),
+                            "job_id": first["job_id"],
+                            "task": "follow up",
+                        },
+                    },
+                )["result"]
+                self.assertFalse(continued["isError"])
+                self.assertEqual(continued["structuredContent"]["status"], "running")
             finally:
                 client.close()
 

@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+VALIDATOR = ROOT / "plugins" / "grok-companion" / "skills" / "grok-companion" / "scripts" / "validate.py"
+
+
+class SkillContractTests(unittest.TestCase):
+    def run_validator(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(VALIDATOR), *args],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+
+    def test_list_exposes_only_bounded_sop_files(self):
+        proc = self.run_validator("list")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("SKILL.md", proc.stdout)
+        self.assertIn("references/routing.md", proc.stdout)
+        self.assertIn("templates/review-result.json", proc.stdout)
+        self.assertNotIn("scripts/validate.py", proc.stdout)
+
+    def test_read_allows_sop_and_rejects_escape(self):
+        readable = self.run_validator("read", "references/routing.md")
+        self.assertEqual(readable.returncode, 0, readable.stderr)
+        self.assertIn("Does Not Own", readable.stdout)
+
+        escaped = self.run_validator("read", "../scripts/grb.py")
+        self.assertNotEqual(escaped.returncode, 0)
+        self.assertIn("dot-segment", escaped.stderr)
+
+    def test_validate_checks_installed_plugin_contract(self):
+        proc = self.run_validator("validate")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("13 MCP tools", proc.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -11,6 +11,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -22,12 +23,17 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.2.3"
+VERSION = "0.3.0"
 DEFAULT_TIMEOUT = 1800
 DEFAULT_MAX_TURNS = 20
 DEFAULT_CONTEXT_LIMIT = 80000
 JOB_ROOT_NAME = ".grok-companion"
-TERMINAL_STATUSES = {"complete", "failed", "timeout", "cancelled"}
+TERMINAL_STATUSES = {"complete", "failed", "timeout", "cancelled", "unknown"}
+REVIEW_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "review-output.schema.json"
+
+
+class ReviewSchemaError(RuntimeError):
+    pass
 
 
 def utc_now() -> str:
@@ -304,11 +310,9 @@ def build_prompt(mode: str, task: str, args: argparse.Namespace, git_context: di
                     """
                     Run a read-only code review. Do not propose broad rewrites unless needed for a concrete risk.
 
-                    Output format:
-                    1. Findings first, ordered by severity.
-                    2. For each finding include severity, file/path and line if inferable, why it matters, and the smallest fix direction.
-                    3. Then list open questions or test gaps.
-                    4. End with a short overall risk call.
+                    Return only the JSON object required by the supplied review schema.
+                    Order findings by severity. Include precise file and line evidence when available.
+                    Use an empty findings array and verdict "approve" when no actionable issue exists.
 
                     Prioritize bugs, regressions, data loss, auth/security, concurrency, deploy/runtime breakage, and missing tests.
                     """
@@ -352,6 +356,13 @@ def build_prompt(mode: str, task: str, args: argparse.Namespace, git_context: di
         )
     elif mode == "ask":
         sections.append(markdown_block("Ask Contract", "Answer directly. Use tools only if the question requires them."))
+    elif mode == "continue":
+        sections.append(
+            markdown_block(
+                "Continue Contract",
+                "Continue the resumed Grok session using its prior context. Address the new task directly and distinguish new evidence from earlier conclusions.",
+            )
+        )
 
     return "\n\n".join(sections).strip() + "\n"
 
@@ -433,6 +444,12 @@ def grok_command(meta: dict[str, Any]) -> list[str]:
         cmd.extend(["--best-of-n", str(meta["best_of_n"])])
     if meta.get("session_id"):
         cmd.extend(["--resume", meta["session_id"]])
+    if meta.get("mode") in {"review", "adversarial-review"}:
+        try:
+            schema = REVIEW_SCHEMA_PATH.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReviewSchemaError(f"review schema unavailable: {REVIEW_SCHEMA_PATH}: {exc}") from exc
+        cmd.extend(["--json-schema", schema])
     if meta.get("tools") is not None:
         cmd.extend(["--tools", meta["tools"]])
     if meta.get("disallowed_tools"):
@@ -461,6 +478,143 @@ def extract_text(stdout: str) -> tuple[str, Any]:
     return str(parsed), parsed
 
 
+def extract_session_id(parsed: Any) -> str | None:
+    if not isinstance(parsed, dict):
+        return None
+    for key in ("sessionId", "session_id"):
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def extract_review(parsed: Any) -> dict[str, Any] | None:
+    candidates: list[Any] = []
+    if isinstance(parsed, dict):
+        candidates.append(parsed.get("structuredOutput"))
+        candidates.append(parsed.get("structured_output"))
+        for key in ("text", "content", "output"):
+            value = parsed.get(key)
+            if isinstance(value, str):
+                try:
+                    candidates.append(json.loads(value))
+                except json.JSONDecodeError:
+                    pass
+    candidates.append(parsed)
+    required = {"verdict", "summary", "findings", "next_steps"}
+    for candidate in candidates:
+        if isinstance(candidate, dict) and required.issubset(candidate):
+            if candidate.get("verdict") not in {"approve", "needs-attention"}:
+                continue
+            if not isinstance(candidate.get("summary"), str) or not candidate["summary"].strip():
+                continue
+            if not isinstance(candidate.get("findings"), list) or not isinstance(candidate.get("next_steps"), list):
+                continue
+            if not all(isinstance(step, str) and step.strip() for step in candidate["next_steps"]):
+                continue
+            if not all(valid_review_finding(finding) for finding in candidate["findings"]):
+                continue
+            return candidate
+    return None
+
+
+def valid_review_finding(finding: Any) -> bool:
+    if not isinstance(finding, dict):
+        return False
+    required = {"severity", "title", "body", "file", "line_start", "line_end", "confidence", "recommendation"}
+    if set(finding) != required:
+        return False
+    if finding["severity"] not in {"critical", "high", "medium", "low"}:
+        return False
+    if not isinstance(finding["title"], str) or not finding["title"].strip():
+        return False
+    if not isinstance(finding["body"], str) or not finding["body"].strip():
+        return False
+    if not isinstance(finding["file"], str) or not isinstance(finding["recommendation"], str):
+        return False
+    for key in ("line_start", "line_end"):
+        value = finding[key]
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
+            return False
+    if finding["line_start"] and finding["line_end"] and finding["line_end"] < finding["line_start"]:
+        return False
+    confidence = finding["confidence"]
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+        return False
+    return True
+
+
+def render_review_markdown(review: dict[str, Any]) -> str:
+    lines = ["# Grok Review", "", f"**Verdict:** {review['verdict']}", "", str(review["summary"]).strip()]
+    findings = review.get("findings") or []
+    lines.extend(["", "## Findings", ""])
+    if not findings:
+        lines.append("No actionable findings.")
+    for index, finding in enumerate(findings, 1):
+        severity = str(finding.get("severity") or "unknown").upper()
+        lines.append(f"### {index}. [{severity}] {finding.get('title') or 'Untitled finding'}")
+        location = str(finding.get("file") or "").strip()
+        line_start = finding.get("line_start")
+        line_end = finding.get("line_end")
+        if location:
+            if line_start:
+                location += f":{line_start}"
+                if line_end and line_end != line_start:
+                    location += f"-{line_end}"
+            lines.extend(["", f"**Location:** `{location}`"])
+        lines.extend(
+            [
+                "",
+                str(finding.get("body") or "").strip(),
+                "",
+                f"**Confidence:** {finding.get('confidence', '')}",
+                "",
+                f"**Recommendation:** {str(finding.get('recommendation') or '').strip()}",
+                "",
+            ]
+        )
+    lines.extend(["## Next Steps", ""])
+    next_steps = review.get("next_steps") or []
+    if next_steps:
+        lines.extend(f"- {step}" for step in next_steps)
+    else:
+        lines.append("- None.")
+    return "\n".join(lines).strip() + "\n"
+
+
+def finalize_runtime_failure(job_dir: Path, meta: dict[str, Any], message: str, returncode: int) -> int:
+    (job_dir / "raw.stderr").write_text(message + "\n", encoding="utf-8")
+    atomic_write_text(job_dir / "result.md", "")
+    latest_meta = load_meta(job_dir)
+    status = "cancelled" if latest_meta.get("status") in {"cancel_requested", "cancelled"} else "failed"
+    atomic_write_text(
+        job_dir / "result.json",
+        json.dumps(
+            {
+                "job_id": meta["job_id"],
+                "status": status,
+                "returncode": returncode,
+                "text": "",
+                "parsed": None,
+                "session_id": None,
+                "review": None,
+                "contract_error": message if returncode == 78 else None,
+                "stderr_tail": message,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+    )
+    latest_meta["status"] = status
+    latest_meta["returncode"] = returncode
+    latest_meta["error"] = message
+    latest_meta["finished_at"] = utc_now()
+    latest_meta.pop("pid", None)
+    save_meta(job_dir, latest_meta)
+    return returncode
+
+
 def run_job(job_dir: Path) -> int:
     meta = load_meta(job_dir)
     if meta.get("status") == "cancel_requested":
@@ -471,11 +625,10 @@ def run_job(job_dir: Path) -> int:
     meta["started_at"] = utc_now()
     save_meta(job_dir, meta)
 
-    cmd = grok_command(meta)
-    meta["command"] = cmd
-    save_meta(job_dir, meta)
-
     try:
+        cmd = grok_command(meta)
+        meta["command"] = cmd
+        save_meta(job_dir, meta)
         proc = subprocess.run(
             cmd,
             cwd=meta.get("cwd") or None,
@@ -489,36 +642,51 @@ def run_job(job_dir: Path) -> int:
         (job_dir / "raw.stdout").write_text(stdout, encoding="utf-8")
         (job_dir / "raw.stderr").write_text(stderr, encoding="utf-8")
         text, parsed = extract_text(stdout)
+        session_id = extract_session_id(parsed)
+        review = extract_review(parsed) if meta.get("mode") in {"review", "adversarial-review"} else None
+        contract_error = None
+        if meta.get("mode") in {"review", "adversarial-review"}:
+            if review is None:
+                contract_error = "Grok review output did not match the required structured review contract"
+            else:
+                text = render_review_markdown(review)
         atomic_write_text(job_dir / "result.md", text.strip() + ("\n" if text.strip() else ""))
         latest_meta = load_meta(job_dir)
-        status = "cancelled" if latest_meta.get("status") in {"cancel_requested", "cancelled"} else ("complete" if proc.returncode == 0 else "failed")
+        if latest_meta.get("status") in {"cancel_requested", "cancelled"}:
+            status = "cancelled"
+        elif proc.returncode == 0 and contract_error is None:
+            status = "complete"
+        else:
+            status = "failed"
+        effective_returncode = proc.returncode if proc.returncode != 0 else (2 if contract_error else 0)
         result_json = {
             "job_id": meta["job_id"],
             "status": status,
-            "returncode": proc.returncode,
+            "returncode": effective_returncode,
+            "grok_returncode": proc.returncode,
             "text": text,
             "parsed": parsed,
+            "session_id": session_id,
+            "review": review,
+            "contract_error": contract_error,
             "stderr_tail": stderr[-4000:],
         }
         atomic_write_text(job_dir / "result.json", json.dumps(result_json, ensure_ascii=False, indent=2) + "\n")
         latest_meta["status"] = status
-        latest_meta["returncode"] = proc.returncode
+        latest_meta["returncode"] = effective_returncode
+        latest_meta["grok_returncode"] = proc.returncode
         latest_meta["finished_at"] = utc_now()
+        if session_id:
+            latest_meta["result_session_id"] = session_id
+        if contract_error:
+            latest_meta["error"] = contract_error
         latest_meta.pop("pid", None)
         save_meta(job_dir, latest_meta)
-        return proc.returncode
+        return effective_returncode
+    except ReviewSchemaError as exc:
+        return finalize_runtime_failure(job_dir, meta, str(exc), 78)
     except FileNotFoundError:
-        message = f"grok binary not found: {cmd[0]}"
-        (job_dir / "raw.stderr").write_text(message + "\n", encoding="utf-8")
-        atomic_write_text(job_dir / "result.md", "")
-        latest_meta = load_meta(job_dir)
-        latest_meta["status"] = "cancelled" if latest_meta.get("status") in {"cancel_requested", "cancelled"} else "failed"
-        latest_meta["returncode"] = 127
-        latest_meta["error"] = message
-        latest_meta["finished_at"] = utc_now()
-        latest_meta.pop("pid", None)
-        save_meta(job_dir, latest_meta)
-        return 127
+        return finalize_runtime_failure(job_dir, meta, f"grok binary not found: {meta.get('grok_bin') or 'grok'}", 127)
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout or ""
         stderr = exc.stderr or ""
@@ -529,12 +697,15 @@ def run_job(job_dir: Path) -> int:
         (job_dir / "raw.stdout").write_text(stdout, encoding="utf-8")
         (job_dir / "raw.stderr").write_text(stderr + f"\nTimed out after {meta.get('timeout')}s\n", encoding="utf-8")
         text, parsed = extract_text(stdout)
+        session_id = extract_session_id(parsed)
         atomic_write_text(job_dir / "result.md", text.strip() + ("\n" if text.strip() else ""))
         latest_meta = load_meta(job_dir)
         status = "cancelled" if latest_meta.get("status") in {"cancel_requested", "cancelled"} else "timeout"
         latest_meta["status"] = status
         latest_meta["returncode"] = 124
         latest_meta["finished_at"] = utc_now()
+        if session_id:
+            latest_meta["result_session_id"] = session_id
         latest_meta.pop("pid", None)
         save_meta(job_dir, latest_meta)
         atomic_write_text(
@@ -546,6 +717,7 @@ def run_job(job_dir: Path) -> int:
                     "returncode": 124,
                     "text": text,
                     "parsed": parsed,
+                    "session_id": session_id,
                     "stderr_tail": stderr[-4000:],
                 },
                 ensure_ascii=False,
@@ -731,6 +903,93 @@ def execute_mode(args: argparse.Namespace, mode: str) -> int:
     return code
 
 
+def refresh_job_meta(job_dir: Path) -> dict[str, Any]:
+    meta = load_meta(job_dir)
+    pid = meta.get("pid")
+    if meta.get("status") in {"running", "cancel_requested"} and pid and not process_running(int(pid)):
+        meta = load_meta(job_dir)
+        if meta.get("status") == "cancel_requested":
+            return finalize_cancelled_job(job_dir, meta)
+        result = load_result_payload(job_dir)
+        result_status = result.get("status") if result else None
+        if result_status in TERMINAL_STATUSES:
+            meta["status"] = result_status
+            meta["warning"] = "recovered terminal status from result.json after runner exited before final metadata update"
+            meta["returncode"] = result.get("returncode")
+            meta["finished_at"] = meta.get("finished_at") or utc_now()
+        else:
+            meta["status"] = "unknown"
+            meta["warning"] = "pid is no longer alive and no terminal result was recorded"
+        meta.pop("pid", None)
+        save_meta(job_dir, meta)
+    return meta
+
+
+def load_result_payload(job_dir: Path) -> dict[str, Any] | None:
+    result_path = job_dir / "result.json"
+    if not result_path.exists():
+        return None
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    payload["job_dir"] = str(job_dir)
+    return payload
+
+
+def resolve_resume_session(jobs_dir: Path, job_id: str | None, session_id: str | None) -> str:
+    if session_id:
+        return session_id
+    if job_id:
+        jobs = [resolve_job(jobs_dir, job_id)]
+    else:
+        ensure_dir(jobs_dir)
+        jobs = sorted([path for path in jobs_dir.iterdir() if (path / "meta.json").exists()], reverse=True)
+    for job_dir in jobs:
+        meta = load_meta(job_dir)
+        candidate = meta.get("result_session_id")
+        if not candidate:
+            result = load_result_payload(job_dir)
+            candidate = result.get("session_id") if result else None
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    target = job_id or "recent Grok Companion jobs"
+    raise SystemExit(f"No resumable Grok session found for {target}")
+
+
+def execute_continue(args: argparse.Namespace) -> int:
+    jobs_dir = Path(args.jobs_dir).expanduser().resolve() if args.jobs_dir else default_jobs_dir()
+    args.session_id = resolve_resume_session(jobs_dir, args.job_id, args.session_id)
+    return execute_mode(args, "continue")
+
+
+def command_sessions(args: argparse.Namespace) -> int:
+    cmd = [args.grok_bin, "sessions", "search" if args.query else "list"]
+    if args.query:
+        cmd.append(args.query)
+    cmd.extend(["--limit", str(args.limit)])
+    result = run_quiet(cmd, cwd=Path.cwd().resolve(), timeout=args.timeout)
+    session_ids = []
+    for line in result["stdout"].splitlines():
+        first = line.strip().split(maxsplit=1)[0] if line.strip() else ""
+        if first == "SESSION" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,}", first):
+            continue
+        session_ids.append(first)
+    payload = {
+        "status": "ok" if result["ok"] else "failed",
+        "query": args.query,
+        "limit": args.limit,
+        "session_ids": session_ids,
+        "text": result["stdout"].strip(),
+        "stderr": result["stderr"].strip(),
+        "returncode": result["returncode"],
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif payload["text"]:
+        print(payload["text"])
+    elif payload["stderr"]:
+        print(payload["stderr"], file=sys.stderr)
+    return 0 if result["ok"] else int(result["returncode"] or 1)
+
+
 def command_status(args: argparse.Namespace) -> int:
     jobs_dir = Path(args.jobs_dir).expanduser().resolve() if args.jobs_dir else default_jobs_dir()
     ensure_dir(jobs_dir)
@@ -741,16 +1000,7 @@ def command_status(args: argparse.Namespace) -> int:
         jobs = jobs[-args.limit :]
     rows = []
     for job in jobs:
-        meta = load_meta(job)
-        pid = meta.get("pid")
-        if meta.get("status") in {"running", "cancel_requested"} and pid and not process_running(int(pid)):
-            if meta.get("status") == "cancel_requested":
-                meta = finalize_cancelled_job(job, meta)
-            else:
-                meta["status"] = "unknown"
-                meta["warning"] = "pid is no longer alive but no final result was recorded"
-                save_meta(job, meta)
-        rows.append(meta)
+        rows.append(refresh_job_meta(job))
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
     else:
@@ -763,14 +1013,43 @@ def command_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_wait(args: argparse.Namespace) -> int:
+    jobs_dir = Path(args.jobs_dir).expanduser().resolve() if args.jobs_dir else default_jobs_dir()
+    job_dir = resolve_job(jobs_dir, args.job_id)
+    started = time.monotonic()
+    deadline = started + args.timeout
+    meta = refresh_job_meta(job_dir)
+    while meta.get("status") not in TERMINAL_STATUSES and time.monotonic() < deadline:
+        time.sleep(args.poll_interval)
+        meta = refresh_job_meta(job_dir)
+    completed = meta.get("status") in TERMINAL_STATUSES
+    payload = {
+        "job_id": meta["job_id"],
+        "status": meta.get("status"),
+        "completed": completed,
+        "job_ok": meta.get("status") == "complete",
+        "waited_seconds": round(time.monotonic() - started, 3),
+        "job_dir": str(job_dir),
+        "result": load_result_payload(job_dir) if completed else None,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"{payload['job_id']}  {payload['status']}  completed={str(completed).lower()}")
+        if completed and payload["result"] and payload["result"].get("text"):
+            print(payload["result"]["text"])
+    if completed and not payload["job_ok"]:
+        result_code = payload["result"].get("returncode") if payload["result"] else None
+        return int(result_code) if isinstance(result_code, int) and result_code != 0 else 1
+    return 0
+
+
 def command_result(args: argparse.Namespace) -> int:
     jobs_dir = Path(args.jobs_dir).expanduser().resolve() if args.jobs_dir else default_jobs_dir()
     job_dir = resolve_job(jobs_dir, args.job_id)
     if args.json:
-        result_path = job_dir / "result.json"
-        if result_path.exists():
-            payload = json.loads(result_path.read_text(encoding="utf-8"))
-            payload["job_dir"] = str(job_dir)
+        payload = load_result_payload(job_dir)
+        if payload is not None:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(json.dumps(load_meta(job_dir), ensure_ascii=False, indent=2))
@@ -930,12 +1209,37 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("task", nargs=argparse.REMAINDER)
         p.set_defaults(func=lambda args, mode=name: execute_mode(args, mode))
 
+    p_continue = sub.add_parser("continue", help="Continue a prior Grok session from a companion job or session id")
+    add_runtime_flags(p_continue)
+    p_continue.add_argument("--job-id", help="Companion job whose returned Grok session should be resumed")
+    p_continue.add_argument("--include-git-context", action="store_true", help="Include current git status/diff context")
+    p_continue.add_argument("--base", help="Optional git base ref when including git context")
+    p_continue.add_argument("--context-limit", type=int, default=DEFAULT_CONTEXT_LIMIT)
+    p_continue.add_argument("task", nargs=argparse.REMAINDER)
+    p_continue.set_defaults(func=execute_continue)
+
+    p_sessions = sub.add_parser("sessions", help="List or search Grok CLI sessions")
+    p_sessions.add_argument("query", nargs="?", help="Optional search query")
+    p_sessions.add_argument("--grok-bin", default=os.environ.get("GROK_BIN", "grok"))
+    p_sessions.add_argument("--limit", type=int, default=20)
+    p_sessions.add_argument("--timeout", type=int, default=30)
+    p_sessions.add_argument("--json", action="store_true")
+    p_sessions.set_defaults(func=command_sessions)
+
     p_status = sub.add_parser("status", help="Show running and recent jobs")
     p_status.add_argument("job_id", nargs="?")
     p_status.add_argument("--jobs-dir")
     p_status.add_argument("--limit", type=int, default=10)
     p_status.add_argument("--json", action="store_true")
     p_status.set_defaults(func=command_status)
+
+    p_wait = sub.add_parser("wait", help="Wait for a background job without repeated status polling")
+    p_wait.add_argument("job_id", nargs="?")
+    p_wait.add_argument("--jobs-dir")
+    p_wait.add_argument("--timeout", type=float, default=90.0, help="Maximum seconds to wait before returning")
+    p_wait.add_argument("--poll-interval", type=float, default=0.25)
+    p_wait.add_argument("--json", action="store_true")
+    p_wait.set_defaults(func=command_wait)
 
     p_result = sub.add_parser("result", help="Print a finished job result")
     p_result.add_argument("job_id", nargs="?")

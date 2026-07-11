@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -36,6 +39,11 @@ def make_fake_grok(tmp: Path) -> Path:
                 print("Available models:")
                 print("  * fake-grok")
                 raise SystemExit(0)
+            if len(sys.argv) > 2 and sys.argv[1:3] in (["sessions", "list"], ["sessions", "search"]):
+                print("SESSION ID                            CREATED     UPDATED     STATUS      SUMMARY")
+                session = os.environ.get("GROK_FAKE_SESSION_ID", "11111111-1111-4111-8111-111111111111")
+                print(f"{session}  2026-07-12  2026-07-12  local  Fake session")
+                raise SystemExit(0)
 
             if os.environ.get("GROK_FAKE_SLEEP"):
                 time.sleep(float(os.environ["GROK_FAKE_SLEEP"]))
@@ -44,7 +52,29 @@ def make_fake_grok(tmp: Path) -> Path:
             if "--prompt-file" in sys.argv:
                 idx = sys.argv.index("--prompt-file")
                 prompt = Path(sys.argv[idx + 1]).read_text(encoding="utf-8")
-            print(json.dumps({"text": "FAKE GROK RESULT\\n" + prompt[:120]}))
+            if "--json-schema" in sys.argv:
+                review = {
+                    "verdict": "approve",
+                    "summary": "Fake structured review passed.",
+                    "findings": [],
+                    "next_steps": ["Run the test suite."]
+                }
+                review_mode = os.environ.get("GROK_FAKE_REVIEW_MODE", "text")
+                if review_mode == "invalid":
+                    review["findings"] = [{"severity": "nope"}]
+                text = "structured review envelope" if review_mode == "structured-only" else json.dumps(review)
+            else:
+                text = "FAKE GROK RESULT\\n" + prompt[:120]
+            payload = {
+                "text": text,
+                "argv": sys.argv[1:]
+            }
+            if "--json-schema" in sys.argv and os.environ.get("GROK_FAKE_REVIEW_MODE") in {"structured-only", "invalid"}:
+                payload["structuredOutput"] = review
+            if not os.environ.get("GROK_FAKE_NO_SESSION"):
+                payload["sessionId"] = "11111111-1111-4111-8111-111111111111"
+            print(json.dumps(payload))
+            raise SystemExit(int(os.environ.get("GROK_FAKE_EXIT", "0")))
             """
         ),
         encoding="utf-8",
@@ -54,15 +84,16 @@ def make_fake_grok(tmp: Path) -> Path:
 
 
 class GrbTests(unittest.TestCase):
-    def run_grb(self, tmp: Path, *args: str) -> subprocess.CompletedProcess:
+    def run_grb(self, tmp: Path, *args: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
         fake = make_fake_grok(tmp)
+        env = {**os.environ, "GROK_BIN": str(fake), **(extra_env or {})}
         return subprocess.run(
             [sys.executable, str(GRB), *args],
             cwd=tmp,
             text=True,
             capture_output=True,
             timeout=20,
-            env={**os.environ, "GROK_BIN": str(fake)},
+            env=env,
         )
 
     def test_setup_reports_fake_grok(self):
@@ -144,6 +175,7 @@ class GrbTests(unittest.TestCase):
             self.assertTrue((job_dirs[0] / "result.md").exists())
             meta = json.loads((job_dirs[0] / "meta.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["status"], "complete")
+            self.assertEqual(meta["result_session_id"], "11111111-1111-4111-8111-111111111111")
 
     def test_review_includes_git_context(self):
         with tempfile.TemporaryDirectory() as td:
@@ -174,6 +206,69 @@ class GrbTests(unittest.TestCase):
             self.assertIn("app.py", prompt)
             self.assertIn("new.py", prompt)
             self.assertIn("print('untracked')", prompt)
+            result = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["review"]["verdict"], "approve")
+            self.assertIn("No actionable findings", (job_dir / "result.md").read_text(encoding="utf-8"))
+
+    def test_review_prefers_live_structured_output_envelope(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            proc = self.run_grb(
+                tmp,
+                "review",
+                "--jobs-dir",
+                str(jobs),
+                "review envelope",
+                extra_env={"GROK_FAKE_REVIEW_MODE": "structured-only"},
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            result = json.loads((next(jobs.iterdir()) / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["review"]["summary"], "Fake structured review passed.")
+            self.assertIsNone(result["contract_error"])
+
+    def test_malformed_review_fails_with_contract_evidence(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            proc = self.run_grb(
+                tmp,
+                "review",
+                "--jobs-dir",
+                str(jobs),
+                "invalid review",
+                extra_env={"GROK_FAKE_REVIEW_MODE": "invalid"},
+            )
+            self.assertEqual(proc.returncode, 2)
+            job = next(jobs.iterdir())
+            result = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["returncode"], 2)
+            self.assertEqual(result["grok_returncode"], 0)
+            self.assertIn("structured review contract", result["contract_error"])
+            self.assertIn("nope", (job / "raw.stdout").read_text(encoding="utf-8"))
+
+    def test_missing_review_schema_becomes_durable_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            copied = tmp / "plugin" / "scripts" / "grb.py"
+            copied.parent.mkdir(parents=True)
+            shutil.copy2(GRB, copied)
+            fake = make_fake_grok(tmp)
+            jobs = tmp / "jobs"
+            proc = subprocess.run(
+                [sys.executable, str(copied), "review", "--jobs-dir", str(jobs), "missing schema"],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=20,
+                env={**os.environ, "GROK_BIN": str(fake)},
+            )
+            self.assertEqual(proc.returncode, 78)
+            job = next(jobs.iterdir())
+            result = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("review schema unavailable", result["contract_error"])
 
     def test_result_reads_latest_job(self):
         with tempfile.TemporaryDirectory() as td:
@@ -214,6 +309,132 @@ class GrbTests(unittest.TestCase):
                     break
                 time.sleep(0.05)
             self.assertEqual(status, "complete")
+
+    def test_wait_returns_terminal_result_without_status_polling(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            launch = self.run_grb(tmp, "ask", "--jobs-dir", str(jobs), "--background", "wait for me")
+            job_id = json.loads(launch.stdout)["job_id"]
+            waited = subprocess.run(
+                [sys.executable, str(GRB), "wait", job_id, "--jobs-dir", str(jobs), "--timeout", "5", "--json"],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            self.assertEqual(waited.returncode, 0, waited.stderr)
+            payload = json.loads(waited.stdout)
+            self.assertTrue(payload["completed"])
+            self.assertEqual(payload["status"], "complete")
+            self.assertIn("FAKE GROK RESULT", payload["result"]["text"])
+
+    def test_sessions_and_continue_resume_discovered_job_session(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            first = self.run_grb(tmp, "ask", "--jobs-dir", str(jobs), "first question")
+            self.assertEqual(first.returncode, 0, first.stderr)
+            first_job = next(jobs.iterdir()).name
+
+            continued = self.run_grb(
+                tmp,
+                "continue",
+                "--jobs-dir",
+                str(jobs),
+                "--job-id",
+                first_job,
+                "follow up",
+            )
+            self.assertEqual(continued.returncode, 0, continued.stderr)
+            latest = sorted(jobs.iterdir())[-1]
+            raw = json.loads((latest / "raw.stdout").read_text(encoding="utf-8"))
+            self.assertIn("--resume", raw["argv"])
+            self.assertIn("11111111-1111-4111-8111-111111111111", raw["argv"])
+
+            sessions = self.run_grb(tmp, "sessions", "--json")
+            self.assertEqual(sessions.returncode, 0, sessions.stderr)
+            self.assertEqual(json.loads(sessions.stdout)["session_ids"], ["11111111-1111-4111-8111-111111111111"])
+
+            named = self.run_grb(
+                tmp,
+                "sessions",
+                "--json",
+                extra_env={"GROK_FAKE_SESSION_ID": "session-local-2026"},
+            )
+            self.assertEqual(json.loads(named.stdout)["session_ids"], ["session-local-2026"])
+
+    def test_continue_without_recoverable_session_fails_explicitly(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            first = self.run_grb(
+                tmp,
+                "ask",
+                "--jobs-dir",
+                str(jobs),
+                "no session",
+                extra_env={"GROK_FAKE_NO_SESSION": "1"},
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            job_id = next(jobs.iterdir()).name
+            continued = self.run_grb(
+                tmp,
+                "continue",
+                "--jobs-dir",
+                str(jobs),
+                "--job-id",
+                job_id,
+                "follow up",
+                extra_env={"GROK_FAKE_NO_SESSION": "1"},
+            )
+            self.assertNotEqual(continued.returncode, 0)
+            self.assertIn("No resumable Grok session", continued.stderr)
+
+    def test_wait_recovers_orphan_result_and_terminalizes_unknown(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            recovered = jobs / "job-recovered"
+            recovered.mkdir(parents=True)
+            (recovered / "meta.json").write_text(
+                json.dumps({"job_id": "job-recovered", "status": "running", "pid": 2147483647}),
+                encoding="utf-8",
+            )
+            (recovered / "result.json").write_text(
+                json.dumps({"job_id": "job-recovered", "status": "complete", "returncode": 0, "text": "saved"}),
+                encoding="utf-8",
+            )
+            waited = subprocess.run(
+                [sys.executable, str(GRB), "wait", "job-recovered", "--jobs-dir", str(jobs), "--timeout", "1", "--json"],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            payload = json.loads(waited.stdout)
+            self.assertTrue(payload["completed"])
+            self.assertTrue(payload["job_ok"])
+            self.assertEqual(payload["result"]["text"], "saved")
+
+            unknown = jobs / "job-unknown"
+            unknown.mkdir()
+            (unknown / "meta.json").write_text(
+                json.dumps({"job_id": "job-unknown", "status": "running", "pid": 2147483647}),
+                encoding="utf-8",
+            )
+            unknown_wait = subprocess.run(
+                [sys.executable, str(GRB), "wait", "job-unknown", "--jobs-dir", str(jobs), "--timeout", "1", "--json"],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            unknown_payload = json.loads(unknown_wait.stdout)
+            self.assertNotEqual(unknown_wait.returncode, 0)
+            self.assertTrue(unknown_payload["completed"])
+            self.assertFalse(unknown_payload["job_ok"])
+            self.assertEqual(unknown_payload["status"], "unknown")
 
     def test_job_id_cannot_escape_jobs_directory(self):
         with tempfile.TemporaryDirectory() as td:

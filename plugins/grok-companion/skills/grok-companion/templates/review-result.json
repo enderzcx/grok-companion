@@ -1,0 +1,19 @@
+{
+  "verdict": "needs-attention",
+  "summary": "One actionable issue requires verification.",
+  "findings": [
+    {
+      "severity": "high",
+      "title": "Short finding title",
+      "body": "Explain the concrete behavior, evidence, and impact.",
+      "file": "path/to/file.py",
+      "line_start": 42,
+      "line_end": 42,
+      "confidence": 0.9,
+      "recommendation": "Describe the smallest safe fix direction."
+    }
+  ],
+  "next_steps": [
+    "Verify the finding against the current worktree before editing."
+  ]
+}

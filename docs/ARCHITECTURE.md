@@ -17,10 +17,12 @@ Codex task
   -> mcp_server.py validates arguments
   -> grb.py creates a durable job
   -> local grok CLI runs in the target repository
-  -> status/result/cancel read the same job artifacts
+  -> wait/status/result/cancel read the same job artifacts
 ```
 
 MCP launch tools always use background execution. The initial call returns quickly with a `job_id`, which avoids treating a long Grok inference as an MCP timeout and keeps status/cancel calls available. Foreground waiting remains available through the CLI fallback.
+
+`grok_wait` performs one bounded long-poll over the same disk state and returns the terminal result when available. This keeps agents from issuing tight `grok_status` loops. A timed-out wait does not cancel or restart the job.
 
 ## MCP Surface
 
@@ -34,12 +36,23 @@ grok_review
 grok_adversarial_review
 grok_research
 grok_delegate
+grok_continue
+grok_sessions
 grok_status
+grok_wait
 grok_result
 grok_cancel
 ```
 
 Each call receives an explicit absolute `cwd`. This keeps job artifacts and git context attached to the task repository instead of the installed plugin cache.
+
+## Structured Reviews
+
+Review modes pass `schemas/review-output.schema.json` to Grok CLI through `--json-schema`. The runtime accepts either a direct schema object or a JSON object nested in the CLI response envelope, renders it to `result.md`, and preserves the original structure in `result.json`. A malformed contract produces a failed job with raw output retained for diagnosis.
+
+## Session Continuity
+
+The runtime extracts `sessionId` or `session_id` from Grok JSON output and stores it in both result and job metadata. `grok_sessions` exposes local Grok session discovery. `grok_continue` creates a normal durable job while resolving its resume target from an explicit session id, a prior companion job, or the latest resumable companion job.
 
 ## Job Artifacts
 
@@ -64,6 +77,7 @@ The files make Grok work inspectable after either process exits. Background jobs
 
 - The bridge depends on a working local `grok` CLI login and uses that CLI's model access and network behavior.
 - `review` and `adversarial-review` are read-only prompt contracts. Codex remains responsible for editing, testing, committing, and shipping.
+- Read-only review is not OS-enforced isolation. Structured output improves the result contract, not process permissions.
 - `delegate` can use the full local Grok CLI and may modify files; Codex must inspect and verify delegated changes.
 - The MCP process runs locally. Repository context and prompts are sent to the local Grok CLI, which may send them to xAI under the user's Grok account and applicable terms.
 - `superx` is not replaced. It remains the focused X/Twitter retrieval and X-native research wrapper.

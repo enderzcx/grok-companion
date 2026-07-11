@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "skill": "grok-companion",
+  "cases": [
+    {
+      "prompt": "让 Grok review 当前改动",
+      "should_trigger": true,
+      "route": "grok_review"
+    },
+    {
+      "prompt": "Ask Grok for a second opinion on this caching plan",
+      "should_trigger": true,
+      "route": "grok_consult"
+    },
+    {
+      "prompt": "继续刚才那个 Grok 会话，让它深挖第二个风险",
+      "should_trigger": true,
+      "route": "grok_continue"
+    },
+    {
+      "prompt": "看看 Grok 后台任务结束没有",
+      "should_trigger": true,
+      "route": "grok_wait"
+    },
+    {
+      "prompt": "review 当前 diff",
+      "should_trigger": false,
+      "route": "native-review"
+    },
+    {
+      "prompt": "读取 https://x.com/example/status/123 这条推文",
+      "should_trigger": false,
+      "route": "superx"
+    },
+    {
+      "prompt": "搜索 X 上最近关于 xAI 的讨论",
+      "should_trigger": false,
+      "route": "superx"
+    },
+    {
+      "prompt": "调研一下 Python MCP SDK 的最新版本",
+      "should_trigger": false,
+      "route": "research"
+    },
+    {
+      "prompt": "让 GLM 做一次架构 review",
+      "should_trigger": false,
+      "route": "named-other-collaborator"
+    },
+    {
+      "prompt": "在 Codex 侧边栏打开 Grok 终端",
+      "should_trigger": false,
+      "route": "unsupported-ui"
+    }
+  ]
+}

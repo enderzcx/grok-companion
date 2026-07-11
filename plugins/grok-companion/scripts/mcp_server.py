@@ -8,15 +8,18 @@ import os
 import re
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.2.3"
+SERVER_VERSION = "0.3.0"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
+WRITE_LOCK = threading.Lock()
 
 
 def object_schema(
@@ -57,7 +60,7 @@ RUNTIME_PROPERTIES: dict[str, Any] = {
     "disable_web_search": {"type": "boolean", "default": False},
     "check": {"type": "boolean", "default": False},
     "best_of_n": {"type": "integer", "minimum": 1, "maximum": 32},
-    "session_id": {"type": "string", "description": "Existing Grok session id to resume."},
+    "session_id": {"type": "string", "description": "Existing Grok session id to resume with grok --resume."},
 }
 
 
@@ -115,6 +118,32 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": launch_schema(git_context=True, base=True),
     },
     {
+        "name": "grok_continue",
+        "description": "Continue a prior Grok conversation using an explicit session_id, a companion job_id, or the latest resumable companion job.",
+        "inputSchema": object_schema(
+            {
+                **RUNTIME_PROPERTIES,
+                "job_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$", "description": "Companion job whose returned Grok session should be resumed."},
+                "include_git_context": {"type": "boolean", "default": False},
+                "base": {"type": "string", "description": "Optional git base ref when including git context."},
+            },
+            ["task", "cwd"],
+        ),
+    },
+    {
+        "name": "grok_sessions",
+        "description": "List or search sessions known to the local Grok CLI and return discovered session ids.",
+        "inputSchema": object_schema(
+            {
+                "cwd": CWD,
+                "query": {"type": "string", "description": "Optional search query over Grok session summaries and first prompts."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                "timeout": {"type": "integer", "minimum": 1, "maximum": 300, "default": 30},
+            },
+            ["cwd"],
+        ),
+    },
+    {
         "name": "grok_status",
         "description": "List recent Grok jobs or inspect one job. Use the same cwd/jobs_dir used to launch it.",
         "inputSchema": object_schema(
@@ -135,6 +164,20 @@ TOOLS: list[dict[str, Any]] = [
                 "cwd": CWD,
                 "job_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
                 "jobs_dir": JOBS_DIR,
+            },
+            ["cwd"],
+        ),
+    },
+    {
+        "name": "grok_wait",
+        "description": "Wait once for a Grok job to reach a terminal state and return its result when ready. Prefer this over repeated grok_status polling.",
+        "inputSchema": object_schema(
+            {
+                "cwd": CWD,
+                "job_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+                "jobs_dir": JOBS_DIR,
+                "timeout": {"type": "integer", "minimum": 0, "maximum": 300, "default": 90},
+                "poll_interval_ms": {"type": "integer", "minimum": 50, "maximum": 5000, "default": 250},
             },
             ["cwd"],
         ),
@@ -210,6 +253,7 @@ def launch_tool(name: str, args: dict[str, Any]) -> tuple[int, Any, str, str]:
         "check",
         "best_of_n",
         "session_id",
+        "job_id",
         "include_git_context",
         "base",
     ):
@@ -227,6 +271,7 @@ def call_tool(name: str, args: dict[str, Any]) -> tuple[int, Any, str, str]:
         "grok_adversarial_review",
         "grok_research",
         "grok_delegate",
+        "grok_continue",
     }:
         return launch_tool(name, args)
 
@@ -243,6 +288,24 @@ def call_tool(name: str, args: dict[str, Any]) -> tuple[int, Any, str, str]:
             cmd.append(str(args["job_id"]))
         add_option(cmd, args, "jobs_dir")
         add_option(cmd, args, "limit")
+        cmd.append("--json")
+        return invoke_grb(cwd, cmd)
+    if name == "grok_sessions":
+        cmd = ["sessions"]
+        if args.get("query"):
+            cmd.append(str(args["query"]))
+        add_option(cmd, args, "limit")
+        add_option(cmd, args, "timeout")
+        cmd.append("--json")
+        return invoke_grb(cwd, cmd)
+    if name == "grok_wait":
+        cmd = ["wait"]
+        if args.get("job_id"):
+            cmd.append(str(args["job_id"]))
+        add_option(cmd, args, "jobs_dir")
+        add_option(cmd, args, "timeout")
+        if args.get("poll_interval_ms") is not None:
+            cmd.extend(["--poll-interval", str(args["poll_interval_ms"] / 1000)])
         cmd.append("--json")
         return invoke_grb(cwd, cmd)
     if name == "grok_result":
@@ -299,9 +362,10 @@ def tool_result(code: int, payload: Any, stdout: str, stderr: str) -> dict[str, 
         text = json.dumps(payload, ensure_ascii=False, indent=2)
     else:
         text = str(payload or stdout or stderr or f"grb exited with code {code}")
+    terminal_job_error = isinstance(payload, dict) and payload.get("completed") is True and payload.get("job_ok") is False
     result: dict[str, Any] = {
         "content": [{"type": "text", "text": text}],
-        "isError": code != 0,
+        "isError": code != 0 or terminal_job_error,
     }
     if isinstance(payload, dict):
         result["structuredContent"] = payload
@@ -335,7 +399,8 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                     "instructions": (
                         "Grok launch tools always use background jobs. Pass the current workspace as cwd, "
-                        "then use grok_status and grok_result. Use superx for exact X/Twitter retrieval."
+                        "then use grok_wait once and read its terminal result. Use grok_sessions and grok_continue "
+                        "for continuity. Use superx for exact X/Twitter retrieval."
                     ),
                 },
             }
@@ -372,24 +437,30 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
 
 def write_message(message: dict[str, Any]) -> None:
     message.setdefault("jsonrpc", "2.0")
-    sys.stdout.write(json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+    with WRITE_LOCK:
+        sys.stdout.write(json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+
+
+def process_message(message: dict[str, Any]) -> None:
+    response = handle_request(message)
+    if response is not None:
+        write_message(response)
 
 
 def main() -> int:
-    for raw_line in sys.stdin:
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            message = json.loads(line)
-            if not isinstance(message, dict):
-                raise ValueError("JSON-RPC message must be an object")
-            response = handle_request(message)
-            if response is not None:
-                write_message(response)
-        except (json.JSONDecodeError, ValueError) as exc:
-            write_message({"id": None, "error": {"code": -32700, "message": str(exc)}})
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="grok-mcp") as executor:
+        for raw_line in sys.stdin:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+                if not isinstance(message, dict):
+                    raise ValueError("JSON-RPC message must be an object")
+                executor.submit(process_message, message)
+            except (json.JSONDecodeError, ValueError) as exc:
+                write_message({"id": None, "error": {"code": -32700, "message": str(exc)}})
     return 0
 
 
