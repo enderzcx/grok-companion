@@ -107,6 +107,7 @@ class McpServerTests(unittest.TestCase):
                         "grok_continue",
                         "grok_sessions",
                         "grok_status",
+                        "grok_monitor",
                         "grok_wait",
                         "grok_result",
                         "grok_cancel",
@@ -188,9 +189,101 @@ class McpServerTests(unittest.TestCase):
                 )["result"]
                 self.assertFalse(result["isError"])
                 self.assertIn("FAKE GROK RESULT", result["structuredContent"]["text"])
+                status = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_status",
+                        "arguments": {
+                            "cwd": str(tmp),
+                            "jobs_dir": str(jobs),
+                            "job_id": job_id,
+                            "detail": "monitor",
+                        },
+                    },
+                )["result"]
+                self.assertFalse(status["isError"])
+                self.assertEqual(status["structuredContent"]["detail"], "monitor")
+                self.assertEqual(status["structuredContent"]["snapshot"]["job_id"], job_id)
                 prompt = (jobs / job_id / "prompt.md").read_text(encoding="utf-8")
                 self.assertIn("-hello from MCP", prompt)
                 self.assertNotIn("## Task\n\n-- -hello", prompt)
+            finally:
+                client.close()
+
+    def test_monitor_renders_running_job_visualization(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            output = tmp / "visualizations" / "grok-job.html"
+            client = self.make_client(tmp, sleep=3)
+            try:
+                self.initialize(client)
+                launch = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_ask",
+                        "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "task": "slow monitor"},
+                    },
+                )["result"]["structuredContent"]
+                monitor = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_monitor",
+                        "arguments": {
+                            "cwd": str(tmp),
+                            "jobs_dir": str(jobs),
+                            "job_id": launch["job_id"],
+                            "output": str(output),
+                        },
+                    },
+                )["result"]
+                self.assertFalse(monitor["isError"])
+                snapshot = monitor["structuredContent"]["snapshot"]
+                self.assertFalse(snapshot["terminal"])
+                self.assertFalse(snapshot["stream_available"])
+                self.assertIn("wait", snapshot["actions"])
+                self.assertEqual(
+                    Path(monitor["structuredContent"]["visualization_path"]),
+                    output.resolve(),
+                )
+                html = output.read_text(encoding="utf-8")
+                self.assertIn("Grok Job Monitor", html)
+                self.assertNotIn("__GROK_MONITOR_JSON__", html)
+                client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_cancel",
+                        "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "job_id": launch["job_id"]},
+                    },
+                )
+            finally:
+                client.close()
+
+    def test_monitor_requires_absolute_output_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            client = self.make_client(tmp)
+            try:
+                self.initialize(client)
+                response = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_monitor",
+                        "arguments": {"cwd": str(tmp), "output": "relative.html"},
+                    },
+                )
+                self.assertIn("output must be an absolute path", response["error"]["message"])
+
+                for output in (tmp / "monitor.txt", tmp.parent / f"outside-{tmp.name}.html"):
+                    rejected = client.request(
+                        "tools/call",
+                        {
+                            "name": "grok_monitor",
+                            "arguments": {"cwd": str(tmp), "output": str(output)},
+                        },
+                    )["result"]
+                    self.assertTrue(rejected["isError"])
+                    self.assertFalse(output.exists())
             finally:
                 client.close()
 

@@ -355,6 +355,55 @@ class GrbTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("FAKE GROK RESULT", result.stdout)
 
+    def test_monitor_renders_terminal_snapshot_and_escapes_embedded_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            ask = self.run_grb(tmp, "ask", "--jobs-dir", str(jobs), "monitor me")
+            self.assertEqual(ask.returncode, 0, ask.stderr)
+            job = next(jobs.iterdir())
+            result_path = job / "result.json"
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result["text"] = "safe </script><script>unsafe()</script>"
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            output = tmp / "grok-job.html"
+            monitor = subprocess.run(
+                [
+                    sys.executable,
+                    str(GRB),
+                    "monitor",
+                    job.name,
+                    "--jobs-dir",
+                    str(jobs),
+                    "--output",
+                    str(output),
+                    "--json",
+                ],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+            self.assertEqual(monitor.returncode, 0, monitor.stderr)
+            payload = json.loads(monitor.stdout)
+            self.assertTrue(payload["snapshot"]["terminal"])
+            self.assertTrue(payload["snapshot"]["job_ok"])
+            self.assertIn("continue", payload["snapshot"]["actions"])
+            html = output.read_text(encoding="utf-8")
+            self.assertIn("\\u003c/script\\u003e", html)
+            self.assertNotIn("</script><script>unsafe", html)
+            self.assertNotIn("__GROK_MONITOR_JSON__", html)
+
+            watched = subprocess.run(
+                [sys.executable, str(GRB), "watch", job.name, "--jobs-dir", str(jobs), "--once", "--json"],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+            self.assertEqual(watched.returncode, 0, watched.stderr)
+            self.assertEqual(json.loads(watched.stdout)["status"], "complete")
+
     def test_background_job_does_not_regress_after_fast_completion(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -491,7 +540,15 @@ class GrbTests(unittest.TestCase):
             unknown = jobs / "job-unknown"
             unknown.mkdir()
             (unknown / "meta.json").write_text(
-                json.dumps({"job_id": "job-unknown", "status": "running", "pid": 2147483647}),
+                json.dumps(
+                    {
+                        "job_id": "job-unknown",
+                        "status": "running",
+                        "pid": 2147483647,
+                        "created_at": "2026-07-13T00:00:00+00:00",
+                        "started_at": "2026-07-13T00:00:00+00:00",
+                    }
+                ),
                 encoding="utf-8",
             )
             unknown_wait = subprocess.run(
@@ -506,6 +563,95 @@ class GrbTests(unittest.TestCase):
             self.assertTrue(unknown_payload["completed"])
             self.assertFalse(unknown_payload["job_ok"])
             self.assertEqual(unknown_payload["status"], "unknown")
+            unknown_meta = json.loads((unknown / "meta.json").read_text(encoding="utf-8"))
+            self.assertIsNotNone(unknown_meta["finished_at"])
+
+            snapshots = []
+            for _ in range(2):
+                status = subprocess.run(
+                    [
+                        sys.executable,
+                        str(GRB),
+                        "status",
+                        "job-unknown",
+                        "--jobs-dir",
+                        str(jobs),
+                        "--detail",
+                        "monitor",
+                        "--json",
+                    ],
+                    cwd=tmp,
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                )
+                envelope = json.loads(status.stdout)
+                self.assertEqual(envelope["detail"], "monitor")
+                snapshots.append(envelope["snapshot"])
+                time.sleep(0.01)
+            self.assertEqual(snapshots[0]["elapsed_seconds"], snapshots[1]["elapsed_seconds"])
+            self.assertNotIn("result", snapshots[0]["actions"])
+
+            legacy = jobs / "job-legacy-terminal"
+            legacy.mkdir()
+            (legacy / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "job_id": "job-legacy-terminal",
+                        "status": "unknown",
+                        "created_at": "2026-07-13T00:00:00+00:00",
+                        "updated_at": "2026-07-13T00:01:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            legacy_status = subprocess.run(
+                [
+                    sys.executable,
+                    str(GRB),
+                    "status",
+                    "job-legacy-terminal",
+                    "--jobs-dir",
+                    str(jobs),
+                    "--detail",
+                    "monitor",
+                    "--json",
+                ],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            legacy_snapshot = json.loads(legacy_status.stdout)["snapshot"]
+            self.assertEqual(legacy_snapshot["finished_at"], "2026-07-13T00:01:00+00:00")
+            self.assertEqual(legacy_snapshot["elapsed_seconds"], 60.0)
+
+    def test_monitor_rejects_output_outside_workspace_or_codex_visualizations(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            ask = self.run_grb(tmp, "ask", "--jobs-dir", str(jobs), "monitor boundaries")
+            self.assertEqual(ask.returncode, 0, ask.stderr)
+            job_id = next(jobs.iterdir()).name
+            for output in (tmp / "monitor.txt", tmp.parent / f"outside-{tmp.name}.html"):
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        str(GRB),
+                        "monitor",
+                        job_id,
+                        "--jobs-dir",
+                        str(jobs),
+                        "--output",
+                        str(output),
+                    ],
+                    cwd=tmp,
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                )
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertFalse(output.exists())
 
     def test_job_id_cannot_escape_jobs_directory(self):
         with tempfile.TemporaryDirectory() as td:

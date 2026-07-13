@@ -1,0 +1,360 @@
+<style>
+  #grok-job-monitor {
+    display: grid;
+    gap: 20px;
+    width: 100%;
+  }
+
+  #grok-job-monitor .gjm-header,
+  #grok-job-monitor .gjm-status-line,
+  #grok-job-monitor .gjm-actions,
+  #grok-job-monitor .gjm-phase-labels {
+    display: flex;
+    align-items: center;
+  }
+
+  #grok-job-monitor .gjm-header {
+    justify-content: space-between;
+    gap: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--color-border-muted);
+  }
+
+  #grok-job-monitor .gjm-status-line {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  #grok-job-monitor .gjm-job-id {
+    margin-top: 6px;
+    overflow-wrap: anywhere;
+  }
+
+  #grok-job-monitor .gjm-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.7fr) minmax(210px, 0.8fr);
+    gap: 24px;
+    align-items: start;
+  }
+
+  #grok-job-monitor .gjm-runtime {
+    display: grid;
+    gap: 14px;
+  }
+
+  #grok-job-monitor .gjm-time-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  #grok-job-monitor .gjm-phases {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  #grok-job-monitor .gjm-phase {
+    height: 4px;
+    background: var(--color-border-muted);
+  }
+
+  #grok-job-monitor .gjm-phase[data-state="done"] {
+    background: var(--color-border-primary);
+  }
+
+  #grok-job-monitor .gjm-phase[data-state="current"] {
+    background: var(--viz-series-1);
+  }
+
+  #grok-job-monitor .gjm-phase-labels {
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  #grok-job-monitor .gjm-phase-labels [data-state="current"] {
+    color: var(--viz-series-1);
+  }
+
+  #grok-job-monitor .gjm-ledger {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px 16px;
+    margin: 0;
+    padding-left: 20px;
+    border-left: 1px solid var(--color-border-muted);
+  }
+
+  #grok-job-monitor .gjm-ledger dt,
+  #grok-job-monitor .gjm-ledger dd {
+    margin: 0;
+  }
+
+  #grok-job-monitor .gjm-ledger dd {
+    text-align: right;
+    overflow-wrap: anywhere;
+  }
+
+  #grok-job-monitor .gjm-output {
+    display: grid;
+    gap: 10px;
+    padding: 16px;
+  }
+
+  #grok-job-monitor .gjm-output-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  #grok-job-monitor .gjm-preview {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  #grok-job-monitor .gjm-followup {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: end;
+  }
+
+  #grok-job-monitor .gjm-field {
+    display: grid;
+    gap: 6px;
+  }
+
+  #grok-job-monitor .gjm-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  #grok-job-monitor [hidden] {
+    display: none !important;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    #grok-job-monitor .gjm-phase[data-state="current"] {
+      animation: gjm-pulse 1.8s ease-in-out infinite;
+    }
+  }
+
+  @keyframes gjm-pulse {
+    50% { opacity: 0.55; }
+  }
+
+  @media (max-width: 540px) {
+    #grok-job-monitor {
+      gap: 16px;
+    }
+
+    #grok-job-monitor .gjm-header,
+    #grok-job-monitor .gjm-time-row {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    #grok-job-monitor .gjm-grid {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 18px;
+    }
+
+    #grok-job-monitor .gjm-ledger {
+      padding-top: 16px;
+      padding-left: 0;
+      border-top: 1px solid var(--color-border-muted);
+      border-left: 0;
+    }
+
+    #grok-job-monitor .gjm-followup {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    #grok-job-monitor .gjm-actions {
+      justify-content: stretch;
+    }
+
+    #grok-job-monitor .gjm-actions .btn,
+    #grok-job-monitor .gjm-followup .btn {
+      flex: 1 1 auto;
+    }
+  }
+</style>
+
+<section id="grok-job-monitor" aria-label="Grok Job Monitor">
+  <header class="gjm-header">
+    <div>
+      <div class="gjm-status-line">
+        <strong data-role="status">读取状态</strong>
+        <span class="viz-badge" data-role="mode">Grok</span>
+        <span class="viz-badge" data-role="profile">full</span>
+      </div>
+      <div class="text-small text-muted gjm-job-id" data-role="job-id"></div>
+    </div>
+    <button class="btn" type="button" data-action="refresh">刷新状态</button>
+  </header>
+
+  <div class="gjm-grid">
+    <section class="gjm-runtime" aria-label="运行进度">
+      <div class="gjm-time-row">
+        <div>
+          <div class="text-small text-muted">已运行</div>
+          <div class="viz-stat-value" data-role="elapsed">0 秒</div>
+        </div>
+        <div class="text-small text-muted" data-role="runtime-note"></div>
+      </div>
+
+      <div class="gjm-phases" aria-hidden="true">
+        <span class="gjm-phase" data-phase="start"></span>
+        <span class="gjm-phase" data-phase="run"></span>
+        <span class="gjm-phase" data-phase="finish"></span>
+      </div>
+      <div class="gjm-phase-labels text-small text-muted">
+        <span data-phase-label="start">已启动</span>
+        <span data-phase-label="run">Grok 工作中</span>
+        <span data-phase-label="finish">结果就绪</span>
+      </div>
+    </section>
+
+    <dl class="gjm-ledger text-small">
+      <dt class="text-muted">运行配置</dt><dd data-role="runtime"></dd>
+      <dt class="text-muted">自检</dt><dd data-role="check"></dd>
+      <dt class="text-muted">进程</dt><dd data-role="process"></dd>
+      <dt class="text-muted">剩余预算</dt><dd data-role="remaining"></dd>
+      <dt class="text-muted">会话</dt><dd data-role="session"></dd>
+    </dl>
+  </div>
+
+  <section class="card gjm-output" aria-live="polite">
+    <div class="gjm-output-head">
+      <strong data-role="output-title">当前活动</strong>
+      <span class="viz-badge" data-role="output-badge">快照</span>
+    </div>
+    <p class="gjm-preview" data-role="preview"></p>
+    <div class="text-small text-muted" data-role="stream-note"></div>
+  </section>
+
+  <div class="gjm-followup" data-role="followup" hidden>
+    <label class="gjm-field">
+      <span class="form-label">继续问 Grok</span>
+      <input class="form-control" data-role="followup-input" type="text" placeholder="补充问题或下一步" />
+    </label>
+    <button class="btn btn-primary" type="button" data-action="continue">发送</button>
+  </div>
+
+  <div class="gjm-actions">
+    <button class="btn btn-primary" type="button" data-action="wait">继续等待</button>
+    <button class="btn" type="button" data-action="result">读取完整结果</button>
+    <button class="btn" type="button" data-action="cancel">取消任务</button>
+  </div>
+</section>
+
+<script type="application/json" id="grok-job-monitor-data">__GROK_MONITOR_JSON__</script>
+<script>
+  (() => {
+    const root = document.getElementById("grok-job-monitor");
+    const payloadNode = document.getElementById("grok-job-monitor-data");
+    if (!root || !payloadNode) return;
+
+    let job;
+    try {
+      job = JSON.parse(payloadNode.textContent || "{}");
+    } catch (error) {
+      root.querySelector('[data-role="preview"]').textContent = "状态数据无法读取。";
+      return;
+    }
+
+    const statusLabels = {
+      queued: "等待启动",
+      created: "准备启动",
+      starting: "正在启动",
+      running: "Grok 工作中",
+      complete: "已完成",
+      failed: "执行失败",
+      timeout: "运行超时",
+      cancelled: "已取消",
+      unknown: "状态未知"
+    };
+    const terminal = Boolean(job.terminal);
+    const actions = new Set(Array.isArray(job.actions) ? job.actions : []);
+    const text = (role, value) => {
+      const node = root.querySelector(`[data-role="${role}"]`);
+      if (node) node.textContent = value == null || value === "" ? "-" : String(value);
+    };
+    const seconds = (value) => {
+      const total = Math.max(0, Number(value) || 0);
+      if (total < 60) return `${Math.round(total)} 秒`;
+      const minutes = Math.floor(total / 60);
+      const remainder = Math.round(total % 60);
+      return remainder ? `${minutes} 分 ${remainder} 秒` : `${minutes} 分`;
+    };
+    const send = (message) => {
+      if (window.openai && typeof window.openai.sendFollowUpMessage === "function") {
+        window.openai.sendFollowUpMessage({ prompt: message });
+      }
+    };
+
+    text("status", statusLabels[job.status] || String(job.status || "状态未知"));
+    text("mode", job.mode ? `Grok ${job.mode}` : "Grok");
+    text("profile", job.profile || "full");
+    text("job-id", job.job_id || "未找到 job id");
+    text("elapsed", seconds(job.elapsed_seconds));
+    text("runtime", `${job.profile || "full"} / ${job.max_turns || "-"} turns / ${seconds(job.timeout)}`);
+    text("check", job.check ? (job.check_strategy || "开启") : "关闭");
+    text("process", terminal ? "已结束" : (job.alive ? `运行中 / PID ${job.pid}` : "未检测到"));
+    text("remaining", terminal ? "已结算" : seconds(job.remaining_seconds));
+    text("session", job.session_id || "任务结束后写入");
+    text("runtime-note", terminal ? "任务已到达终态" : "Grok 可继续使用完整预算");
+    text("output-title", terminal ? "结果预览" : "当前活动");
+    text("output-badge", terminal ? (job.job_ok ? "完成" : "需检查") : "状态快照");
+
+    const fallback = terminal
+      ? "任务已结束。读取完整结果可查看全部内容和错误证据。"
+      : "Grok 正在独立运行。插件会在进程退出后保存完整结果。";
+    text("preview", job.result_preview || job.runner_stderr_tail || fallback);
+    text("stream-note", job.stream_available
+      ? "正在显示可用的增量输出。"
+      : "当前展示进程状态快照，不代表实时 token 流。"
+    );
+
+    const phaseState = terminal
+      ? { start: "done", run: "done", finish: job.job_ok ? "current" : "done" }
+      : { start: "done", run: "current", finish: "pending" };
+    for (const [phase, state] of Object.entries(phaseState)) {
+      const rail = root.querySelector(`[data-phase="${phase}"]`);
+      const label = root.querySelector(`[data-phase-label="${phase}"]`);
+      if (rail) rail.dataset.state = state;
+      if (label) label.dataset.state = state;
+    }
+
+    for (const action of ["wait", "result", "cancel"]) {
+      const button = root.querySelector(`[data-action="${action}"]`);
+      if (button) button.hidden = !actions.has(action);
+    }
+    const followup = root.querySelector('[data-role="followup"]');
+    if (followup) followup.hidden = !actions.has("continue");
+
+    root.querySelector('[data-action="refresh"]')?.addEventListener("click", () => {
+      send(`使用 Grok Companion 刷新 job ${job.job_id} 的状态，并重新展示 Job Monitor。`);
+    });
+    root.querySelector('[data-action="wait"]')?.addEventListener("click", () => {
+      send(`使用 Grok Companion 对 job ${job.job_id} 继续调用 grok_wait。未完成就继续等待同一个 job，不要重启。`);
+    });
+    root.querySelector('[data-action="result"]')?.addEventListener("click", () => {
+      send(`使用 Grok Companion 读取 job ${job.job_id} 的完整结果。`);
+    });
+    root.querySelector('[data-action="cancel"]')?.addEventListener("click", () => {
+      send(`使用 Grok Companion 取消 job ${job.job_id}。`);
+    });
+    root.querySelector('[data-action="continue"]')?.addEventListener("click", () => {
+      const input = root.querySelector('[data-role="followup-input"]');
+      const followupText = input ? input.value.trim() : "";
+      if (!followupText) return;
+      send(`使用 Grok Companion 继续 job ${job.job_id} 对应的 Grok 会话。后续问题：${followupText}`);
+    });
+  })();
+</script>

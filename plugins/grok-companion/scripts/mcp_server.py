@@ -15,7 +15,7 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.3.1"
+SERVER_VERSION = "0.4.0"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
@@ -150,15 +150,35 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "grok_status",
-        "description": "List recent Grok jobs or inspect one job. Use the same cwd/jobs_dir used to launch it.",
+        "description": "List recent Grok jobs or inspect one job. detail=monitor returns a rich status snapshot without claiming live token streaming.",
         "inputSchema": object_schema(
             {
                 "cwd": CWD,
                 "job_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
                 "jobs_dir": JOBS_DIR,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+                "detail": {"type": "string", "enum": ["summary", "monitor"], "default": "summary"},
+                "tail_chars": {"type": "integer", "minimum": 0, "maximum": 20000, "default": 4000},
             },
             ["cwd"],
+        ),
+    },
+    {
+        "name": "grok_monitor",
+        "description": "Render a Grok job snapshot as a Codex inline visualization HTML file. Refresh by calling the tool again for the same job and output path.",
+        "inputSchema": object_schema(
+            {
+                "cwd": CWD,
+                "job_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+                "jobs_dir": JOBS_DIR,
+                "output": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Absolute .html output path inside cwd or the current Codex visualization directory.",
+                },
+                "tail_chars": {"type": "integer", "minimum": 0, "maximum": 20000, "default": 4000},
+            },
+            ["cwd", "output"],
         ),
     },
     {
@@ -297,6 +317,20 @@ def call_tool(name: str, args: dict[str, Any]) -> tuple[int, Any, str, str]:
             cmd.append(str(args["job_id"]))
         add_option(cmd, args, "jobs_dir")
         add_option(cmd, args, "limit")
+        add_option(cmd, args, "detail")
+        add_option(cmd, args, "tail_chars")
+        cmd.append("--json")
+        return invoke_grb(cwd, cmd)
+    if name == "grok_monitor":
+        output = Path(str(args["output"])).expanduser()
+        if not output.is_absolute():
+            raise ValueError("output must be an absolute path")
+        cmd = ["monitor"]
+        if args.get("job_id"):
+            cmd.append(str(args["job_id"]))
+        add_option(cmd, args, "jobs_dir")
+        cmd.extend(["--output", str(output)])
+        add_option(cmd, args, "tail_chars")
         cmd.append("--json")
         return invoke_grb(cwd, cmd)
     if name == "grok_sessions":
@@ -410,7 +444,8 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                         "Grok launch tools always use background jobs. Pass the current workspace as cwd, "
                         "then repeat bounded grok_wait calls with the same job_id until terminal. An incomplete wait "
                         "does not justify cancellation or restart. Full is the default runtime profile; quick is opt-in. "
-                        "Use grok_sessions and grok_continue for continuity. Use superx for exact X/Twitter retrieval."
+                        "Use grok_monitor for a refreshable inline job snapshot, and grok_sessions plus grok_continue "
+                        "for continuity. Use superx for exact X/Twitter retrieval."
                     ),
                 },
             }

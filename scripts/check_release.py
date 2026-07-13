@@ -26,6 +26,7 @@ def main() -> int:
     skill = (PLUGIN / "skills" / "grok-companion" / "SKILL.md").read_text(encoding="utf-8")
     evals = json.loads((PLUGIN / "skills" / "grok-companion" / "evals" / "trigger_cases.json").read_text(encoding="utf-8"))
     schema = json.loads((PLUGIN / "schemas" / "review-output.schema.json").read_text(encoding="utf-8"))
+    monitor_template = PLUGIN / "skills" / "grok-companion" / "templates" / "job-monitor.html"
 
     version = manifest["version"]
     for label, text, pattern in (
@@ -39,7 +40,7 @@ def main() -> int:
     required_tools = {
         "grok_setup", "grok_ask", "grok_consult", "grok_review",
         "grok_adversarial_review", "grok_research", "grok_delegate",
-        "grok_continue", "grok_sessions", "grok_status", "grok_wait",
+        "grok_continue", "grok_sessions", "grok_status", "grok_monitor", "grok_wait",
         "grok_result", "grok_cancel",
     }
     missing = sorted(name for name in required_tools if f'"name": "{name}"' not in server)
@@ -61,6 +62,14 @@ def main() -> int:
         fail("skill frontmatter/body is missing trigger or exclusion language")
     if schema.get("required") != ["verdict", "summary", "findings", "next_steps"]:
         fail("review schema required fields drifted")
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", str(monitor_template.relative_to(ROOT))],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    if tracked.returncode != 0:
+        fail("job monitor template is not tracked by git")
 
     validator = PLUGIN / "skills" / "grok-companion" / "scripts" / "validate.py"
     proc = subprocess.run([sys.executable, str(validator), "validate"], text=True, capture_output=True)

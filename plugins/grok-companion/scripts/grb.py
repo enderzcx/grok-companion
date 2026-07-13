@@ -23,7 +23,7 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 DEFAULT_PROFILE = "full"
 PROFILE_DEFAULTS = {
     "full": {"max_turns": 30, "timeout": 3600},
@@ -36,6 +36,7 @@ DEFAULT_CONTEXT_LIMIT = 80000
 JOB_ROOT_NAME = ".grok-companion"
 TERMINAL_STATUSES = {"complete", "failed", "timeout", "cancelled", "unknown"}
 REVIEW_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "review-output.schema.json"
+MONITOR_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "skills" / "grok-companion" / "templates" / "job-monitor.html"
 
 
 class ReviewSchemaError(RuntimeError):
@@ -957,6 +958,7 @@ def refresh_job_meta(job_dir: Path) -> dict[str, Any]:
         else:
             meta["status"] = "unknown"
             meta["warning"] = "pid is no longer alive and no terminal result was recorded"
+            meta["finished_at"] = meta.get("finished_at") or utc_now()
         meta.pop("pid", None)
         save_meta(job_dir, meta)
     return meta
@@ -969,6 +971,125 @@ def load_result_payload(job_dir: Path) -> dict[str, Any] | None:
     payload = json.loads(result_path.read_text(encoding="utf-8"))
     payload["job_dir"] = str(job_dir)
     return payload
+
+
+def parse_timestamp(value: Any) -> dt.datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed
+
+
+def read_tail(path: Path, limit: int) -> str:
+    if limit <= 0 or not path.exists():
+        return ""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max(4096, limit * 4)))
+            return handle.read().decode("utf-8", errors="replace")[-limit:]
+    except OSError:
+        return ""
+
+
+def path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def validate_monitor_output(output: Path) -> Path:
+    resolved = output.expanduser().resolve()
+    codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser().resolve()
+    allowed_roots = (Path.cwd().resolve(), codex_home / "visualizations")
+    if not any(path_is_within(resolved, root) for root in allowed_roots):
+        roots = " or ".join(str(root) for root in allowed_roots)
+        raise SystemExit(f"Monitor output must be inside {roots}")
+    if resolved.suffix.lower() != ".html":
+        raise SystemExit("Monitor output must use an .html extension")
+    return resolved
+
+
+def build_monitor_snapshot(job_dir: Path, tail_chars: int = 4000) -> dict[str, Any]:
+    tail_chars = max(0, min(tail_chars, 20000))
+    meta = refresh_job_meta(job_dir)
+    status = str(meta.get("status") or "unknown")
+    terminal = status in TERMINAL_STATUSES
+    started = parse_timestamp(meta.get("started_at") or meta.get("created_at"))
+    finished = parse_timestamp(meta.get("finished_at")) if terminal else None
+    if terminal and finished is None:
+        meta["finished_at"] = meta.get("updated_at") or utc_now()
+        save_meta(job_dir, meta)
+        finished = parse_timestamp(meta["finished_at"])
+    now = dt.datetime.now(dt.timezone.utc)
+    elapsed = max(0.0, ((finished or now) - started).total_seconds()) if started else 0.0
+    timeout = int(meta.get("timeout") or DEFAULT_TIMEOUT)
+    try:
+        result = load_result_payload(job_dir) if terminal else None
+    except (OSError, json.JSONDecodeError):
+        result = None
+    result_text = str(result.get("text") or "") if result else ""
+    session_id = meta.get("result_session_id") or (result.get("session_id") if result else None) or meta.get("session_id")
+    pid = meta.get("pid")
+    alive = process_running(int(pid)) if isinstance(pid, int) else False
+    actions = ["refresh"]
+    if terminal:
+        if result is not None:
+            actions.append("result")
+        if session_id:
+            actions.append("continue")
+    else:
+        actions.extend(["wait", "cancel"])
+    return {
+        "version": VERSION,
+        "job_id": meta.get("job_id"),
+        "status": status,
+        "terminal": terminal,
+        "job_ok": (result.get("status") == "complete" if result else status == "complete") if terminal else None,
+        "mode": meta.get("mode"),
+        "profile": meta.get("profile") or DEFAULT_PROFILE,
+        "max_turns": meta.get("max_turns") or DEFAULT_MAX_TURNS,
+        "timeout": timeout,
+        "remaining_seconds": round(max(0.0, timeout - elapsed), 3) if not terminal else None,
+        "check": bool(meta.get("check")),
+        "check_strategy": meta.get("check_strategy") or "off",
+        "elapsed_seconds": round(elapsed, 3),
+        "created_at": meta.get("created_at"),
+        "started_at": meta.get("started_at"),
+        "updated_at": meta.get("updated_at"),
+        "finished_at": meta.get("finished_at"),
+        "last_activity_at": meta.get("updated_at"),
+        "pid": pid,
+        "alive": alive,
+        "session_id": session_id,
+        "job_dir": str(job_dir),
+        "stream_available": False,
+        "stdout_tail": read_tail(job_dir / "raw.stdout", tail_chars),
+        "stderr_tail": read_tail(job_dir / "raw.stderr", tail_chars),
+        "runner_stderr_tail": read_tail(job_dir / "runner.stderr", tail_chars),
+        "result_preview": (result_text[:797] + "...") if len(result_text) > 800 else (result_text or None),
+        "actions": actions,
+    }
+
+
+def render_monitor_html(snapshot: dict[str, Any]) -> str:
+    try:
+        template = MONITOR_TEMPLATE_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"Monitor template unavailable: {MONITOR_TEMPLATE_PATH}: {exc}") from exc
+    payload = json.dumps(snapshot, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    marker = "__GROK_MONITOR_JSON__"
+    if marker not in template:
+        raise SystemExit(f"Monitor template marker missing: {marker}")
+    return template.replace(marker, payload)
 
 
 def resolve_resume_session(jobs_dir: Path, job_id: str | None, session_id: str | None) -> str:
@@ -1030,6 +1151,17 @@ def command_sessions(args: argparse.Namespace) -> int:
 def command_status(args: argparse.Namespace) -> int:
     jobs_dir = Path(args.jobs_dir).expanduser().resolve() if args.jobs_dir else default_jobs_dir()
     ensure_dir(jobs_dir)
+    if args.detail == "monitor":
+        job_dir = resolve_job(jobs_dir, args.job_id)
+        snapshot = build_monitor_snapshot(job_dir, args.tail_chars)
+        payload = {"detail": "monitor", "snapshot": snapshot}
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"{snapshot['job_id']}  {snapshot['status']}  elapsed={snapshot['elapsed_seconds']}s")
+            print(f"  profile={snapshot['profile']}  turns={snapshot['max_turns']}  runtime={snapshot['timeout']}s")
+            print(f"  alive={str(snapshot['alive']).lower()}  session={snapshot['session_id'] or '-'}")
+        return 0
     jobs = sorted([p for p in jobs_dir.iterdir() if (p / "meta.json").exists()])
     if args.job_id:
         jobs = [resolve_job(jobs_dir, args.job_id)]
@@ -1048,6 +1180,52 @@ def command_status(args: argparse.Namespace) -> int:
             print(f"{meta['job_id']}  {meta.get('status')}  {meta.get('mode')}  {meta.get('updated_at')}")
             print(f"  {meta.get('job_dir')}")
     return 0
+
+
+def command_monitor(args: argparse.Namespace) -> int:
+    jobs_dir = Path(args.jobs_dir).expanduser().resolve() if args.jobs_dir else default_jobs_dir()
+    job_dir = resolve_job(jobs_dir, args.job_id)
+    snapshot = build_monitor_snapshot(job_dir, args.tail_chars)
+    output = validate_monitor_output(Path(args.output))
+    ensure_dir(output.parent)
+    atomic_write_text(output, render_monitor_html(snapshot))
+    payload = {"snapshot": snapshot, "visualization_path": str(output)}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(output)
+    return 0
+
+
+def print_watch_snapshot(snapshot: dict[str, Any]) -> None:
+    print(f"Grok Job  {snapshot['job_id']}")
+    print(f"status    {snapshot['status']}  elapsed {snapshot['elapsed_seconds']}s  alive {str(snapshot['alive']).lower()}")
+    print(f"runtime   {snapshot['profile']}  {snapshot['max_turns']} turns  {snapshot['timeout']}s  check {snapshot['check_strategy']}")
+    print(f"session   {snapshot['session_id'] or '-'}")
+    preview = snapshot.get("result_preview") or snapshot.get("runner_stderr_tail") or "Process status only; Grok output is stored when the job exits."
+    print("\n" + str(preview).strip())
+
+
+def command_watch(args: argparse.Namespace) -> int:
+    if args.interval <= 0:
+        raise SystemExit("Watch interval must be greater than zero")
+    jobs_dir = Path(args.jobs_dir).expanduser().resolve() if args.jobs_dir else default_jobs_dir()
+    job_dir = resolve_job(jobs_dir, args.job_id)
+    try:
+        while True:
+            snapshot = build_monitor_snapshot(job_dir, args.tail_chars)
+            if args.json:
+                print(json.dumps(snapshot, ensure_ascii=False), flush=True)
+            else:
+                if sys.stdout.isatty():
+                    print("\033[2J\033[H", end="")
+                print_watch_snapshot(snapshot)
+            if args.once or snapshot["terminal"]:
+                return 0 if snapshot["job_ok"] is not False else 1
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("\nStopped watching; the Grok job is still running.", file=sys.stderr)
+        return 130
 
 
 def command_wait(args: argparse.Namespace) -> int:
@@ -1154,6 +1332,7 @@ def command_cancel(args: argparse.Namespace) -> int:
         if latest_meta.get("status") not in TERMINAL_STATUSES:
             latest_meta["status"] = "unknown"
             latest_meta["warning"] = "pid not found during cancel"
+            latest_meta["finished_at"] = latest_meta.get("finished_at") or utc_now()
             latest_meta.pop("pid", None)
             save_meta(job_dir, latest_meta)
         payload = {
@@ -1271,8 +1450,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("job_id", nargs="?")
     p_status.add_argument("--jobs-dir")
     p_status.add_argument("--limit", type=int, default=10)
+    p_status.add_argument("--detail", choices=["summary", "monitor"], default="summary")
+    p_status.add_argument("--tail-chars", type=int, default=4000)
     p_status.add_argument("--json", action="store_true")
     p_status.set_defaults(func=command_status)
+
+    p_monitor = sub.add_parser("monitor", help="Render a snapshot of a Grok job as an inline visualization fragment")
+    p_monitor.add_argument("job_id", nargs="?")
+    p_monitor.add_argument("--jobs-dir")
+    p_monitor.add_argument("--output", required=True)
+    p_monitor.add_argument("--tail-chars", type=int, default=4000)
+    p_monitor.add_argument("--json", action="store_true")
+    p_monitor.set_defaults(func=command_monitor)
+
+    p_watch = sub.add_parser("watch", help="Watch one Grok job in a user-opened terminal")
+    p_watch.add_argument("job_id", nargs="?")
+    p_watch.add_argument("--jobs-dir")
+    p_watch.add_argument("--interval", type=float, default=2.0)
+    p_watch.add_argument("--tail-chars", type=int, default=4000)
+    p_watch.add_argument("--once", action="store_true")
+    p_watch.add_argument("--json", action="store_true")
+    p_watch.set_defaults(func=command_watch)
 
     p_wait = sub.add_parser("wait", help="Wait for a background job without repeated status polling")
     p_wait.add_argument("job_id", nargs="?")

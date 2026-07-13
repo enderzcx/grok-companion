@@ -2,6 +2,13 @@
 
 All notable changes to Grok Companion are documented here.
 
+## 0.4.0 - 2026-07-13
+
+- Add `grok_monitor`, a native MCP tool that renders a responsive Codex inline Job Monitor from durable job state.
+- Add `status --detail monitor` and the CLI `watch` command over the same snapshot model.
+- Expose status, elapsed time, runtime budget, profile, self-check, process liveness, session continuity, result preview, and conversation-native refresh/wait/result/cancel/continue actions.
+- Keep the observation contract honest: current Grok output is captured on process exit, so the monitor identifies itself as a status snapshot rather than a live token stream.
+
 ## 0.3.1 - 2026-07-13
 
 - Change unparameterized launch defaults to the `full` profile: 30 turns and a 3600-second job runtime.

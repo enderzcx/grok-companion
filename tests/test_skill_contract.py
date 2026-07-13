@@ -27,6 +27,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("SKILL.md", proc.stdout)
         self.assertIn("references/routing.md", proc.stdout)
         self.assertIn("templates/review-result.json", proc.stdout)
+        self.assertIn("templates/job-monitor.html", proc.stdout)
         self.assertNotIn("scripts/validate.py", proc.stdout)
 
     def test_read_allows_sop_and_rejects_escape(self):
@@ -41,7 +42,7 @@ class SkillContractTests(unittest.TestCase):
     def test_validate_checks_installed_plugin_contract(self):
         proc = self.run_validator("validate")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("13 MCP tools", proc.stdout)
+        self.assertIn("14 MCP tools", proc.stdout)
 
     def test_skill_requires_full_context_wait_and_session_continuity(self):
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")

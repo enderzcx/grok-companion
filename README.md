@@ -4,11 +4,11 @@
 
 让 **Codex** 把本机 **Grok CLI** 当作完整的外部协作者使用。
 
-Grok Companion v0.3.1 是一个带 13 个原生 MCP 工具的 Codex plugin。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带有界等待的后台 job 管理。
+Grok Companion v0.4.0 是一个带 14 个原生 MCP 工具的 Codex plugin。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
 
 > **这不是 Codex 侧边栏终端。**
 >
-> 它不会把 Grok 嵌成一个常驻 shell 或侧边栏聊天窗口。产品形态是 Codex 原生 MCP 工具 + CLI 回退，背后调用本机 `grok` 并返回可查询的 `job_id` 与产物文件。
+> 它不会把 Grok 嵌成一个常驻 shell 或侧边栏聊天窗口。v0.4 增加了线程内 Rich Visualization Job Monitor，以及可由用户在终端运行的 `watch`；背后仍是同一个本机 `grok` job 与产物模型。
 
 产品方向参考 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)，但本项目是 Codex plugin，不是 Claude Code slash-command 插件。
 
@@ -26,6 +26,7 @@ Grok Companion v0.3.1 是一个带 13 个原生 MCP 工具的 Codex plugin。Cod
 | 续聊 | `grok_continue` | `continue` | 按 session、companion job 或最近可恢复 job 续写 |
 | Session 发现 | `grok_sessions` | `sessions` | 列出或搜索本机 Grok CLI sessions |
 | 状态 | `grok_status` | `status` | 非阻塞查看近期或指定 job |
+| Job Monitor | `grok_monitor` | `monitor` / `watch` | 在线程内查看状态快照，或在终端持续观察 |
 | 有界等待 | `grok_wait` | `wait` | 单次有界等待；未完成时继续等待同一 job |
 | 结果 | `grok_result` | `result` | 读取已存储结果 |
 | 取消 | `grok_cancel` | `cancel` | 终止后台 runner 及其子进程 |
@@ -77,6 +78,12 @@ Codex 调用 grok_review / grok_research / grok_continue / ...
 5. 只有用户明确要求或存在真实运行原因时才调用 `grok_cancel`。
 
 每次 MCP 调用都要使用当前 Codex workspace 的绝对路径作为 `cwd`。同一 job 的 `cwd` 和可选 `jobs_dir` 必须保持一致。
+
+## Job Monitor
+
+`grok_monitor` 把指定 job 渲染为 Codex 线程内的 Rich Visualization：包括状态、已运行时间、剩余预算、profile、turns、自检方式、进程存活、session、结果预览，以及刷新、继续等待、读取结果、取消和续聊操作。输出路径被限制在当前 workspace 或 `$CODEX_HOME/visualizations` 下。
+
+它是可刷新的状态快照，不是假装实时的 token stream。当前 Grok 子进程会在退出后写入完整 stdout 与结果；运行中阶段显示可靠的进程和预算信息。需要自己盯着终端时，可运行 `grb.py watch <job-id>`，退出 watcher 不会取消 Grok job。
 
 ## Full 与 Quick
 
@@ -134,6 +141,8 @@ python3 plugins/grok-companion/scripts/grb.py wait <job-id> --timeout 120 --json
 python3 plugins/grok-companion/scripts/grb.py sessions --json
 python3 plugins/grok-companion/scripts/grb.py continue --background --job-id <job-id> "深挖第二个风险"
 python3 plugins/grok-companion/scripts/grb.py status
+python3 plugins/grok-companion/scripts/grb.py monitor <job-id> --output /absolute/path/grok-job.html
+python3 plugins/grok-companion/scripts/grb.py watch <job-id>
 python3 plugins/grok-companion/scripts/grb.py result
 python3 plugins/grok-companion/scripts/grb.py cancel <job-id>
 ```
@@ -241,15 +250,15 @@ python3 scripts/check_release.py
 python3 -m unittest discover -s tests -v
 ```
 
-测试使用假 `grok`，覆盖 13 个 MCP 工具、结构化 review、session 续接、后台 launch -> wait/result、进程树取消和竞态回归。GitHub Actions 在 Python 3.9 与 3.12 上运行编译、release consistency 和全量单测。
+测试使用假 `grok`，覆盖 14 个 MCP 工具、Job Monitor、结构化 review、session 续接、后台 launch -> wait/result、进程树取消和竞态回归。GitHub Actions 在 Python 3.9 与 3.12 上运行编译、release consistency 和全量单测。
 
-## v0.3 边界
+## v0.4 边界
 
 - 依赖本机已登录的 Grok CLI。
 - MCP 是 Codex 主路径，CLI 是同一运行时的完整回退入口。
 - 后台 job 是本地进程 + 磁盘产物，不是云端队列。
 - 当前没有 Codex sidebar terminal，也不是长期 REPL。
-- 当前没有自定义内联 UI；未来可以在不改变 job runtime 的情况下添加。
+- `grok_monitor` 是线程内状态快照；当前不提供实时 token stream。
 - Review 只读是 prompt 契约，不是 OS 强制隔离。
 - Session continue 依赖本机可恢复的 Grok session，不保证跨机器迁移。
 - 未点名 Grok 的普通 review/research 不会自动路由到本插件。

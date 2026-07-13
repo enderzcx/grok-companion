@@ -17,7 +17,7 @@ Codex task
   -> mcp_server.py validates arguments
   -> grb.py creates a durable job
   -> local grok CLI runs in the target repository
-  -> wait/status/result/cancel read the same job artifacts
+  -> wait/status/monitor/result/cancel read the same job artifacts
 ```
 
 MCP launch tools always use background execution. The initial call returns quickly with a `job_id`, which avoids treating a long Grok inference as an MCP timeout and keeps status/cancel calls available. Foreground waiting remains available through the CLI fallback.
@@ -45,12 +45,19 @@ grok_delegate
 grok_continue
 grok_sessions
 grok_status
+grok_monitor
 grok_wait
 grok_result
 grok_cancel
 ```
 
 Each call receives an explicit absolute `cwd`. This keeps job artifacts and git context attached to the task repository instead of the installed plugin cache.
+
+## Observation Surfaces
+
+`grok_status --detail monitor` builds a bounded snapshot from job metadata and stored artifacts. `grok_monitor` injects that snapshot into the bundled `job-monitor.html` fragment so Codex can present a responsive, conversation-native Rich Visualization. Its buttons use `window.openai.sendFollowUpMessage` to ask Codex to refresh, wait, read, cancel, or continue the same job.
+
+The current Grok subprocess is captured until exit, so the monitor explicitly reports `stream_available: false`. It shows process liveness, elapsed time, runtime budget, profile, self-check mode, session, and any stored result preview. It does not claim progressive token streaming. Monitor files are confined to the current workspace or `$CODEX_HOME/visualizations`. The CLI `watch` command renders the same snapshot model in a user-opened terminal and stopping the watcher does not cancel the job.
 
 ## Structured Reviews
 
@@ -87,4 +94,4 @@ The files make Grok work inspectable after either process exits. Background jobs
 - `delegate` can use the full local Grok CLI and may modify files; Codex must inspect and verify delegated changes.
 - The MCP process runs locally. Repository context and prompts are sent to the local Grok CLI, which may send them to xAI under the user's Grok account and applicable terms.
 - `superx` is not replaced. It remains the focused X/Twitter retrieval and X-native research wrapper.
-- This plugin does not add a native Codex sidebar terminal. MCP tools appear in Codex tasks; an optional inline job UI can be added later without changing the runtime.
+- This plugin does not add a native Codex sidebar terminal. MCP tools appear in Codex tasks, and `grok_monitor` provides the supported inline observation surface without changing the durable job runtime.

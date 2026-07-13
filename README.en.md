@@ -4,11 +4,11 @@
 
 Use the local **Grok CLI** as a full external collaborator inside **Codex**.
 
-Grok Companion v0.3.1 is a Codex plugin with 13 native MCP tools for consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with bounded waiting.
+Grok Companion v0.4.0 is a Codex plugin with 14 native MCP tools for consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
 
 > **This is not a Codex sidebar terminal.**
 >
-> It does not embed Grok as a persistent shell or sidebar chat. The product surface is native MCP tools plus a CLI fallback, backed by the local `grok` process and inspectable job artifacts.
+> It does not embed Grok as a persistent shell or sidebar chat. v0.4 adds a conversation-native Rich Visualization Job Monitor and an optional user-opened terminal `watch`, both backed by the same local `grok` job and artifacts.
 
 The product direction is inspired by [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc), but this is a Codex plugin, not a Claude Code slash-command plugin.
 
@@ -26,6 +26,7 @@ The product direction is inspired by [openai/codex-plugin-cc](https://github.com
 | Continue | `grok_continue` | `continue` | Resume by session, companion job, or latest resumable job |
 | Session discovery | `grok_sessions` | `sessions` | List or search local Grok CLI sessions |
 | Status | `grok_status` | `status` | Inspect jobs without blocking |
+| Job Monitor | `grok_monitor` | `monitor` / `watch` | Inspect an inline status snapshot or watch from a terminal |
 | Bounded wait | `grok_wait` | `wait` | One bounded wait; re-wait on the same job when incomplete |
 | Result | `grok_result` | `result` | Read stored results |
 | Cancel | `grok_cancel` | `cancel` | Terminate the runner and its children |
@@ -77,6 +78,12 @@ Typical flow:
 5. Use `grok_cancel` only on explicit user direction or for a real operational reason.
 
 Every MCP call requires the absolute current workspace path as `cwd`. Keep `cwd` and an optional `jobs_dir` consistent for the same job.
+
+## Job Monitor
+
+`grok_monitor` renders a Grok job as a Codex inline Rich Visualization with status, elapsed time, remaining budget, profile, turns, self-check mode, process liveness, session, result preview, and refresh, wait, result, cancel, and continue actions. Output is confined to the current workspace or `$CODEX_HOME/visualizations`.
+
+It is a refreshable status snapshot, not a pretend live token stream. The current Grok child writes complete stdout and results after exit; while running, the monitor shows reliable process and budget state. For a terminal view, run `grb.py watch <job-id>`. Stopping the watcher never cancels the Grok job.
 
 ## Full And Quick Profiles
 
@@ -134,6 +141,8 @@ python3 plugins/grok-companion/scripts/grb.py wait <job-id> --timeout 120 --json
 python3 plugins/grok-companion/scripts/grb.py sessions --json
 python3 plugins/grok-companion/scripts/grb.py continue --background --job-id <job-id> "Dig deeper"
 python3 plugins/grok-companion/scripts/grb.py status
+python3 plugins/grok-companion/scripts/grb.py monitor <job-id> --output /absolute/path/grok-job.html
+python3 plugins/grok-companion/scripts/grb.py watch <job-id>
 python3 plugins/grok-companion/scripts/grb.py result
 python3 plugins/grok-companion/scripts/grb.py cancel <job-id>
 ```
@@ -241,15 +250,15 @@ python3 scripts/check_release.py
 python3 -m unittest discover -s tests -v
 ```
 
-Tests use a fake `grok` binary and cover all 13 MCP tools, structured review, session continuation, launch -> wait/result, process-tree cancellation, and race regressions. GitHub Actions runs compile, release consistency, and the full suite on Python 3.9 and 3.12.
+Tests use a fake `grok` binary and cover all 14 MCP tools, the Job Monitor, structured review, session continuation, launch -> wait/result, process-tree cancellation, and race regressions. GitHub Actions runs compile, release consistency, and the full suite on Python 3.9 and 3.12.
 
-## Public v0.3 Boundaries
+## Public v0.4 Boundaries
 
 - Requires a working local Grok CLI login.
 - MCP is the primary Codex path; CLI is a full fallback over the same runtime.
 - Background jobs are local processes plus disk artifacts, not a cloud queue.
 - There is no Codex sidebar terminal or persistent REPL.
-- There is no custom inline UI yet; one can be added later without replacing the job runtime.
+- `grok_monitor` is an inline status snapshot; the current runtime does not expose live token streaming.
 - Review read-only is a prompt contract, not OS-enforced isolation.
 - Session continuation depends on locally resumable Grok sessions and is not a cross-machine transfer guarantee.
 - Generic review or research that does not name Grok is not auto-routed here.

@@ -50,7 +50,7 @@ def validate() -> int:
     required_tools = {
         "grok_setup", "grok_ask", "grok_consult", "grok_review",
         "grok_adversarial_review", "grok_research", "grok_delegate",
-        "grok_continue", "grok_sessions", "grok_status", "grok_wait",
+        "grok_continue", "grok_sessions", "grok_status", "grok_monitor", "grok_wait",
         "grok_result", "grok_cancel",
     }
     missing = sorted(name for name in required_tools if f'"name": "{name}"' not in server)
@@ -68,6 +68,9 @@ def validate() -> int:
         fail("review schema required fields drifted")
     if not set(schema["required"]).issubset(template):
         fail("review result template is missing required schema fields")
+    monitor = (SKILL / "templates" / "job-monitor.html").read_text(encoding="utf-8")
+    if "__GROK_MONITOR_JSON__" not in monitor or "sendFollowUpMessage" not in monitor:
+        fail("job monitor template is missing its data marker or Codex actions")
 
     print(f"grok-companion validate: ok ({version}, {len(cases)} route cases, {len(required_tools)} MCP tools)")
     return 0

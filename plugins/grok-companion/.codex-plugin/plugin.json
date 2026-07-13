@@ -1,6 +1,6 @@
 {
   "name": "grok-companion",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Use the local Grok CLI as a complete external collaborator for Codex: consult, review, research, delegate, and manage jobs.",
   "author": {
     "name": "Ender",
@@ -29,7 +29,8 @@
       "Review",
       "Research",
       "Delegate",
-      "Continue"
+      "Continue",
+      "Job Monitor"
     ],
     "defaultPrompt": [
       "Ask Grok to review my current diff.",
