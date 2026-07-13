@@ -15,7 +15,7 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.3.1"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
@@ -53,12 +53,17 @@ RUNTIME_PROPERTIES: dict[str, Any] = {
     "model": {"type": "string", "description": "Optional Grok model id."},
     "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
     "reasoning_effort": {"type": "string"},
-    "max_turns": {"type": "integer", "minimum": 1, "maximum": 200},
-    "timeout": {"type": "integer", "minimum": 1, "maximum": 86400},
+    "profile": {
+        "type": "string",
+        "enum": ["full", "quick"],
+        "description": "Runtime profile. Omission defaults to full: 30 turns and a 3600-second job timeout.",
+    },
+    "max_turns": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Explicit profile override."},
+    "timeout": {"type": "integer", "minimum": 1, "maximum": 86400, "description": "Job runtime in seconds, not the grok_wait budget."},
     "tools": {"type": "string", "description": "Comma-separated Grok tool allowlist."},
     "disallowed_tools": {"type": "string", "description": "Comma-separated Grok tool denylist."},
     "disable_web_search": {"type": "boolean", "default": False},
-    "check": {"type": "boolean", "default": False},
+    "check": {"type": "boolean", "description": "Explicit self-check override. When omitted, full enables it for review, adversarial review, and research. Structured reviews use a prompt self-check because Grok CLI rejects --check with --json-schema."},
     "best_of_n": {"type": "integer", "minimum": 1, "maximum": 32},
     "session_id": {"type": "string", "description": "Existing Grok session id to resume with grok --resume."},
 }
@@ -170,7 +175,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "grok_wait",
-        "description": "Wait once for a Grok job to reach a terminal state and return its result when ready. Prefer this over repeated grok_status polling.",
+        "description": "Perform one bounded wait for a Grok job. If incomplete, call grok_wait again with the same job_id; never restart or cancel merely because a wait elapsed.",
         "inputSchema": object_schema(
             {
                 "cwd": CWD,
@@ -245,12 +250,12 @@ def launch_tool(name: str, args: dict[str, Any]) -> tuple[int, Any, str, str]:
         "model",
         "effort",
         "reasoning_effort",
+        "profile",
         "max_turns",
         "timeout",
         "tools",
         "disallowed_tools",
         "disable_web_search",
-        "check",
         "best_of_n",
         "session_id",
         "job_id",
@@ -258,6 +263,10 @@ def launch_tool(name: str, args: dict[str, Any]) -> tuple[int, Any, str, str]:
         "base",
     ):
         add_option(cmd, args, key)
+    if args.get("check") is True:
+        cmd.append("--check")
+    elif args.get("check") is False:
+        cmd.append("--no-check")
     cmd.append("--background")
     cmd.extend(["--format", "json", "--", args["task"]])
     return invoke_grb(cwd, cmd)
@@ -399,8 +408,9 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                     "instructions": (
                         "Grok launch tools always use background jobs. Pass the current workspace as cwd, "
-                        "then use grok_wait once and read its terminal result. Use grok_sessions and grok_continue "
-                        "for continuity. Use superx for exact X/Twitter retrieval."
+                        "then repeat bounded grok_wait calls with the same job_id until terminal. An incomplete wait "
+                        "does not justify cancellation or restart. Full is the default runtime profile; quick is opt-in. "
+                        "Use grok_sessions and grok_continue for continuity. Use superx for exact X/Twitter retrieval."
                     ),
                 },
             }

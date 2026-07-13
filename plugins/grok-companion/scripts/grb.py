@@ -23,9 +23,15 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.3.0"
-DEFAULT_TIMEOUT = 1800
-DEFAULT_MAX_TURNS = 20
+VERSION = "0.3.1"
+DEFAULT_PROFILE = "full"
+PROFILE_DEFAULTS = {
+    "full": {"max_turns": 30, "timeout": 3600},
+    "quick": {"max_turns": 6, "timeout": 300},
+}
+AUTO_CHECK_MODES = {"review", "adversarial-review", "research"}
+DEFAULT_TIMEOUT = PROFILE_DEFAULTS[DEFAULT_PROFILE]["timeout"]
+DEFAULT_MAX_TURNS = PROFILE_DEFAULTS[DEFAULT_PROFILE]["max_turns"]
 DEFAULT_CONTEXT_LIMIT = 80000
 JOB_ROOT_NAME = ".grok-companion"
 TERMINAL_STATUSES = {"complete", "failed", "timeout", "cancelled", "unknown"}
@@ -364,6 +370,14 @@ def build_prompt(mode: str, task: str, args: argparse.Namespace, git_context: di
             )
         )
 
+    if getattr(args, "check", False) and mode in {"review", "adversarial-review"}:
+        sections.append(
+            markdown_block(
+                "Self-Check Contract",
+                "Before emitting the final JSON object, verify every conclusion against the task, repository context, diff, and output schema. Correct unsupported findings internally. Emit no verification prose outside the schema.",
+            )
+        )
+
     return "\n\n".join(sections).strip() + "\n"
 
 
@@ -379,6 +393,26 @@ def load_meta(job_dir: Path) -> dict[str, Any]:
 def save_meta(job_dir: Path, meta: dict[str, Any]) -> None:
     meta["updated_at"] = utc_now()
     atomic_write_text(job_dir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
+
+
+def resolve_runtime_profile(args: argparse.Namespace, mode: str) -> None:
+    profile = getattr(args, "profile", None) or DEFAULT_PROFILE
+    defaults = PROFILE_DEFAULTS[profile]
+    args.profile = profile
+    if getattr(args, "max_turns", None) is None:
+        args.max_turns = defaults["max_turns"]
+    if getattr(args, "timeout", None) is None:
+        args.timeout = defaults["timeout"]
+    if getattr(args, "check", None) is None:
+        args.check = profile == "full" and mode in AUTO_CHECK_MODES
+
+
+def resolved_check_strategy(mode: str, check: bool) -> str:
+    if not check:
+        return "off"
+    if mode in {"review", "adversarial-review"}:
+        return "prompt"
+    return "native"
 
 
 def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: dict[str, Any] | None = None) -> tuple[str, Path, dict[str, Any]]:
@@ -401,6 +435,7 @@ def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: di
         "jobs_dir": str(jobs_dir),
         "job_dir": str(job_dir),
         "grok_bin": args.grok_bin,
+        "profile": getattr(args, "profile", DEFAULT_PROFILE),
         "model": getattr(args, "model", None),
         "effort": getattr(args, "effort", None),
         "reasoning_effort": getattr(args, "reasoning_effort", None),
@@ -410,6 +445,7 @@ def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: di
         "disallowed_tools": getattr(args, "disallowed_tools", None),
         "disable_web_search": getattr(args, "disable_web_search", False),
         "check": getattr(args, "check", False),
+        "check_strategy": resolved_check_strategy(mode, getattr(args, "check", False)),
         "best_of_n": getattr(args, "best_of_n", None),
         "session_id": getattr(args, "session_id", None),
         "format": getattr(args, "format", "md"),
@@ -456,7 +492,7 @@ def grok_command(meta: dict[str, Any]) -> list[str]:
         cmd.extend(["--disallowed-tools", meta["disallowed_tools"]])
     if meta.get("disable_web_search"):
         cmd.append("--disable-web-search")
-    if meta.get("check"):
+    if meta.get("check_strategy") == "native":
         cmd.append("--check")
     return cmd
 
@@ -869,6 +905,7 @@ def command_setup(args: argparse.Namespace) -> int:
 
 
 def execute_mode(args: argparse.Namespace, mode: str) -> int:
+    resolve_runtime_profile(args, mode)
     task_parts = args.task[1:] if args.task and args.task[0] == "--" else args.task
     task = " ".join(task_parts).strip()
     if not task:
@@ -1154,12 +1191,16 @@ def add_runtime_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", help="Grok model id")
     parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="Grok reasoning effort alias")
     parser.add_argument("--reasoning-effort", help="Explicit reasoning effort")
-    parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
-    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--profile", choices=sorted(PROFILE_DEFAULTS), default=DEFAULT_PROFILE, help="Runtime profile (default: full)")
+    parser.add_argument("--max-turns", type=int, help="Override the profile turn budget")
+    parser.add_argument("--timeout", type=int, help="Override the profile job runtime in seconds")
     parser.add_argument("--tools", help="Comma-separated Grok tools allowlist")
     parser.add_argument("--disallowed-tools", help="Comma-separated Grok tools denylist")
     parser.add_argument("--disable-web-search", action="store_true")
-    parser.add_argument("--check", action="store_true", help="Ask Grok to self-verify before final output")
+    check_group = parser.add_mutually_exclusive_group()
+    check_group.add_argument("--check", dest="check", action="store_true", help="Force Grok self-verification on")
+    check_group.add_argument("--no-check", dest="check", action="store_false", help="Force Grok self-verification off")
+    parser.set_defaults(check=None)
     parser.add_argument("--best-of-n", type=int, help="Use Grok best-of-N for the primary run")
     parser.add_argument("--session-id", help="Resume an existing Grok session id")
     parser.add_argument("--background", action="store_true", help="Start job and return immediately")

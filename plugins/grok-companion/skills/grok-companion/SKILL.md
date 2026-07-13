@@ -19,10 +19,14 @@ For exact X/Twitter URLs, posts, accounts, threads, articles, search, or X-nativ
 
 1. Prefer visible `grok_*` MCP tools.
 2. Pass the absolute current workspace as `cwd` on every call.
-3. Launch tools return a background `job_id`.
-4. Call `grok_wait` once with a bounded timeout. Avoid tight `grok_status` polling.
-5. Follow [references/result-handling.md](references/result-handling.md) when presenting or accepting results.
-6. Use the bundled `scripts/grb.py` CLI only when MCP is unavailable or foreground execution is specifically required.
+3. Use `profile=full` by default. It resolves to 30 turns and a 3600-second job runtime; review, adversarial review, and research also self-check. Do not lower these budgets merely to fit the current Codex turn.
+4. Use `profile=quick` only for a connectivity smoke, a deliberately small fixed-answer task, or an explicit user request. It resolves to 6 turns, 300 seconds, and no automatic self-check.
+5. Launch tools return a background `job_id`.
+6. Call `grok_wait` with a bounded timeout. If it returns `completed: false`, call it again with the same `job_id`. Avoid tight `grok_status` polling.
+7. Follow [references/result-handling.md](references/result-handling.md) when presenting or accepting results.
+8. Use the bundled `scripts/grb.py` CLI only when MCP is unavailable or foreground execution is specifically required.
+
+Explicit `max_turns`, job `timeout`, and `check` values override the selected profile. The launch `timeout` is Grok's total job runtime; the `grok_wait` timeout is only one bounded observation window and never cancels the job.
 
 Do not invent tools that are not visible in the current session.
 
@@ -48,13 +52,15 @@ It exposes only `SKILL.md`, `references/`, `templates/`, and `evals/`; it refuse
 - `grok_continue`: continue by `session_id`, prior companion `job_id`, or the latest resumable companion job.
 - `grok_sessions`: list or search Grok CLI sessions.
 - `grok_status`: inspect jobs without waiting.
-- `grok_wait`: wait once and return the terminal result when ready.
+- `grok_wait`: perform one bounded wait; repeat with the same job until terminal.
 - `grok_result`: read a stored result.
 - `grok_cancel`: terminate a background job and its process tree.
 
 ## Safety
 
 - Review modes are read-only contracts. Without `base`, they include unstaged, staged, and untracked text files within the context budget.
+- Give Grok the complete task and all relevant repository context available for the decision. For follow-up questions on the same problem, use `grok_continue` so the existing Grok session context is preserved.
+- Do not cancel or restart a running job merely because a bounded wait returned incomplete. Cancel only on explicit user direction or a real terminal/operational reason.
 - Do not auto-fix review findings. Codex verifies findings and owns edits, tests, commits, and release judgment.
 - `grok_delegate` may use tools or modify files. Invoke it only after explicit user authorization, then inspect the worktree and rerun checks.
 - If authentication or model discovery fails, call `grok_setup` and report the exact failing check. Do not silently switch providers or models.
@@ -63,7 +69,7 @@ It exposes only `SKILL.md`, `references/`, `templates/`, and `evals/`; it refuse
 ## Output Contract
 
 - Launch calls return a durable `job_id`; preserve it until the task reaches a terminal state.
-- `grok_wait` returns `completed`, `job_ok`, `status`, and the stored `result` when terminal. A bounded wait timeout is not a job failure; a terminal `job_ok: false` is.
+- `grok_wait` returns `completed`, `job_ok`, `status`, and the stored `result` when terminal. A bounded wait timeout is not a job failure; continue waiting on the same job. A terminal `job_ok: false` is a failure.
 - Review results preserve `verdict`, `summary`, ordered `findings`, and `next_steps` from the public JSON schema.
 - Failures preserve exact status, partial output, contract errors, and stderr evidence. Do not substitute a different model or collaborator silently.
 
@@ -73,7 +79,8 @@ Resolve the plugin root from this `SKILL.md`, then use its bundled runtime:
 
 ```bash
 python3 <plugin-root>/scripts/grb.py ask --background "Explain this error"
-python3 <plugin-root>/scripts/grb.py review --background --base main "Review this branch"
+python3 <plugin-root>/scripts/grb.py review --background --profile full --base main "Review this branch"
+python3 <plugin-root>/scripts/grb.py ask --background --profile quick "Reply with READY only"
 python3 <plugin-root>/scripts/grb.py wait <job-id> --timeout 120 --json
 python3 <plugin-root>/scripts/grb.py sessions --json
 python3 <plugin-root>/scripts/grb.py continue --background --job-id <job-id> "Dig deeper"

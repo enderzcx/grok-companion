@@ -114,6 +114,10 @@ class McpServerTests(unittest.TestCase):
                 )
                 resources = client.request("resources/list")
                 self.assertEqual(resources["result"]["resources"], [])
+                review_tool = next(tool for tool in response["result"]["tools"] if tool["name"] == "grok_review")
+                properties = review_tool["inputSchema"]["properties"]
+                self.assertEqual(properties["profile"]["enum"], ["full", "quick"])
+                self.assertNotIn("default", properties["check"])
             finally:
                 client.close()
 
@@ -187,6 +191,73 @@ class McpServerTests(unittest.TestCase):
                 prompt = (jobs / job_id / "prompt.md").read_text(encoding="utf-8")
                 self.assertIn("-hello from MCP", prompt)
                 self.assertNotIn("## Task\n\n-- -hello", prompt)
+            finally:
+                client.close()
+
+    def test_mcp_profile_and_boolean_override_reach_runtime(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            client = self.make_client(tmp)
+            try:
+                self.initialize(client)
+                launch = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_review",
+                        "arguments": {
+                            "cwd": str(tmp),
+                            "jobs_dir": str(jobs),
+                            "task": "quick without check",
+                            "profile": "quick",
+                            "check": False,
+                        },
+                    },
+                )["result"]["structuredContent"]
+                waited = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_wait",
+                        "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "job_id": launch["job_id"], "timeout": 5},
+                    },
+                )["result"]
+                self.assertFalse(waited["isError"])
+                meta = json.loads((jobs / launch["job_id"] / "meta.json").read_text(encoding="utf-8"))
+                raw = json.loads((jobs / launch["job_id"] / "raw.stdout").read_text(encoding="utf-8"))
+                self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["check"]), ("quick", 6, 300, False))
+                self.assertNotIn("--check", raw["argv"])
+            finally:
+                client.close()
+
+    def test_mcp_omission_uses_full_mode_specific_self_check(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            client = self.make_client(tmp)
+            try:
+                self.initialize(client)
+                for tool, expected_strategy, native_flag in (
+                    ("grok_review", "prompt", False),
+                    ("grok_research", "native", True),
+                ):
+                    jobs = tmp / f"jobs-{tool}"
+                    launch = client.request(
+                        "tools/call",
+                        {"name": tool, "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "task": "default full"}},
+                    )["result"]["structuredContent"]
+                    waited = client.request(
+                        "tools/call",
+                        {
+                            "name": "grok_wait",
+                            "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "job_id": launch["job_id"], "timeout": 5},
+                        },
+                    )["result"]
+                    self.assertFalse(waited["isError"])
+                    job = jobs / launch["job_id"]
+                    meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+                    raw = json.loads((job / "raw.stdout").read_text(encoding="utf-8"))
+                    self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["check"]), ("full", 30, 3600, True))
+                    self.assertEqual(meta["check_strategy"], expected_strategy)
+                    self.assertEqual("--check" in raw["argv"], native_flag)
             finally:
                 client.close()
 

@@ -4,7 +4,7 @@
 
 Use the local **Grok CLI** as a full external collaborator inside **Codex**.
 
-Grok Companion v0.3.0 is a Codex plugin with 13 native MCP tools for consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with bounded waiting.
+Grok Companion v0.3.1 is a Codex plugin with 13 native MCP tools for consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with bounded waiting.
 
 > **This is not a Codex sidebar terminal.**
 >
@@ -26,7 +26,7 @@ The product direction is inspired by [openai/codex-plugin-cc](https://github.com
 | Continue | `grok_continue` | `continue` | Resume by session, companion job, or latest resumable job |
 | Session discovery | `grok_sessions` | `sessions` | List or search local Grok CLI sessions |
 | Status | `grok_status` | `status` | Inspect jobs without blocking |
-| Bounded wait | `grok_wait` | `wait` | Wait once for a terminal result instead of tight polling |
+| Bounded wait | `grok_wait` | `wait` | One bounded wait; re-wait on the same job when incomplete |
 | Result | `grok_result` | `result` | Read stored results |
 | Cancel | `grok_cancel` | `cancel` | Terminate the runner and its children |
 
@@ -62,7 +62,7 @@ All MCP launch tools always use background jobs:
 Codex calls grok_review / grok_research / grok_continue / ...
         -> receives job_id immediately
         -> local grok runs in the background
-        -> grok_wait performs one bounded wait
+        -> grok_wait performs bounded wait windows
         -> returns the stored result when terminal
 ```
 
@@ -72,11 +72,21 @@ Typical flow:
 
 1. Run `grok_setup` when environment or authentication needs checking.
 2. Launch `grok_review`, `grok_consult`, or another task and keep the returned `job_id`.
-3. Call `grok_wait` once, with a bounded timeout.
-4. If it returns `completed: false`, preserve the same `job_id` instead of silently restarting.
-5. Use `grok_cancel` to stop early.
+3. Call `grok_wait` with a bounded timeout.
+4. If it returns `completed: false`, call `grok_wait` again with the same `job_id`; do not cancel or restart the task.
+5. Use `grok_cancel` only on explicit user direction or for a real operational reason.
 
 Every MCP call requires the absolute current workspace path as `cwd`. Keep `cwd` and an optional `jobs_dir` consistent for the same job.
+
+## Full And Quick Profiles
+
+Formal Grok collaboration defaults to `profile=full`: `max_turns=30` and a 3600-second job runtime. `review`, `adversarial-review`, and `research` also enable Grok self-check by default under full. These defaults let Grok explore and verify a complete answer; do not reduce them merely to fit one Codex wait window.
+
+`profile=quick` is an explicit lightweight mode: `max_turns=6`, a 300-second job runtime, and no automatic self-check. Use it for connectivity smokes, fixed short answers, or an explicitly requested quick call.
+
+Explicit `max_turns`, `timeout`, and `check` values override the profile. The CLI supports both `--check` and `--no-check`; MCP `check: true|false` is also explicit. Grok CLI currently rejects `--check` together with `--json-schema`, so structured reviews use a schema-safe prompt self-check while research uses native `--check`. Job metadata records `check_strategy` as `prompt`, `native`, or `off`.
+
+A launch tool's `timeout` is the total Grok job runtime. The separate `grok_wait` timeout is only one observation window, remains capped at 300 seconds, and never stops the background job.
 
 ## Structured Reviews
 
@@ -119,6 +129,7 @@ python3 plugins/grok-companion/scripts/grb.py consult --include-git-context "Is 
 python3 plugins/grok-companion/scripts/grb.py review --base main "Review this branch"
 python3 plugins/grok-companion/scripts/grb.py adversarial-review --base main "Challenge the architecture"
 python3 plugins/grok-companion/scripts/grb.py research --background "Research the options"
+python3 plugins/grok-companion/scripts/grb.py ask --profile quick "Reply with READY only"
 python3 plugins/grok-companion/scripts/grb.py wait <job-id> --timeout 120 --json
 python3 plugins/grok-companion/scripts/grb.py sessions --json
 python3 plugins/grok-companion/scripts/grb.py continue --background --job-id <job-id> "Dig deeper"
@@ -129,7 +140,7 @@ python3 plugins/grok-companion/scripts/grb.py cancel <job-id>
 
 MCP launch tools always use background execution. The CLI defaults to foreground execution, so add `--background` for long work.
 
-Useful flags include `--base`, `--include-git-context`, `--jobs-dir`, `--model`, `--effort`, `--max-turns`, `--timeout`, `--tools`, `--disallowed-tools`, `--best-of-n`, and `--session-id`.
+Useful flags include `--profile full|quick`, `--base`, `--include-git-context`, `--jobs-dir`, `--model`, `--effort`, `--max-turns`, `--timeout`, `--check`, `--no-check`, `--tools`, `--disallowed-tools`, `--best-of-n`, and `--session-id`.
 
 Without `--base`, review covers the working tree plus index: unstaged, staged, and untracked text files within the context budget.
 

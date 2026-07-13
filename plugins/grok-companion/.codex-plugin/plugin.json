@@ -1,6 +1,6 @@
 {
   "name": "grok-companion",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Use the local Grok CLI as a complete external collaborator for Codex: consult, review, research, delegate, and manage jobs.",
   "author": {
     "name": "Ender",
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Grok Companion",
     "shortDescription": "Use Grok as a native Codex collaborator.",
-    "longDescription": "Grok Companion adds native MCP tools and a local grb bridge so Codex can ask Grok for reviews, adversarial reviews, research briefs, second opinions, and delegated long-running tasks with durable status/result/cancel artifacts.",
+    "longDescription": "Grok Companion adds native MCP tools and a local grb bridge so Codex can ask Grok for reviews, adversarial reviews, research briefs, second opinions, and delegated long-running tasks with full-by-default runtime profiles, session continuity, and durable job artifacts.",
     "developerName": "Ender",
     "category": "Productivity",
     "capabilities": [

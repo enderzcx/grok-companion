@@ -2,6 +2,17 @@
 
 All notable changes to Grok Companion are documented here.
 
+## 0.3.1 - 2026-07-13
+
+- Change unparameterized launch defaults to the `full` profile: 30 turns and a 3600-second job runtime.
+- Add an explicit `quick` profile with 6 turns, a 300-second job runtime, and no automatic self-check.
+- Enable self-check by default for full review, adversarial review, and research jobs; use schema-safe prompt verification for structured reviews and native `--check` for research, with explicit check on/off overrides.
+- Teach Codex to continue bounded waits on the same job without premature cancellation or restart.
+- Clarify that job runtime and each bounded `grok_wait` window are separate budgets.
+- Preserve same-session follow-ups through `grok_continue`; continue jobs resolve their own profile instead of inheriting hidden parent limits.
+
+This release intentionally changes defaults for launch calls that omitted runtime parameters. Explicit runtime flags retain precedence.
+
 ## 0.3.0 - 2026-07-12
 
 - Add bounded `grok_wait` long-polling to avoid repeated status calls.

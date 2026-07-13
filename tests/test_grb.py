@@ -177,6 +177,75 @@ class GrbTests(unittest.TestCase):
             self.assertEqual(meta["status"], "complete")
             self.assertEqual(meta["result_session_id"], "11111111-1111-4111-8111-111111111111")
 
+    def test_full_profile_is_default_and_resolves_by_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            for mode, expected_check in (
+                ("ask", False),
+                ("review", True),
+                ("adversarial-review", True),
+                ("research", True),
+            ):
+                jobs = tmp / f"jobs-{mode}"
+                proc = self.run_grb(tmp, mode, "--jobs-dir", str(jobs), "profile defaults")
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                job = next(jobs.iterdir())
+                meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+                raw = json.loads((job / "raw.stdout").read_text(encoding="utf-8"))
+                self.assertEqual(meta["profile"], "full")
+                self.assertEqual(meta["max_turns"], 30)
+                self.assertEqual(meta["timeout"], 3600)
+                self.assertEqual(meta["check"], expected_check)
+                expected_strategy = "prompt" if mode in {"review", "adversarial-review"} else "native" if expected_check else "off"
+                self.assertEqual(meta["check_strategy"], expected_strategy)
+                self.assertEqual("--check" in raw["argv"], mode == "research")
+                prompt = (job / "prompt.md").read_text(encoding="utf-8")
+                self.assertEqual("Self-Check Contract" in prompt, expected_strategy == "prompt")
+
+    def test_quick_profile_and_explicit_runtime_overrides(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            quick_jobs = tmp / "quick-jobs"
+            quick = self.run_grb(tmp, "research", "--profile", "quick", "--jobs-dir", str(quick_jobs), "quick")
+            self.assertEqual(quick.returncode, 0, quick.stderr)
+            quick_job = next(quick_jobs.iterdir())
+            quick_meta = json.loads((quick_job / "meta.json").read_text(encoding="utf-8"))
+            quick_raw = json.loads((quick_job / "raw.stdout").read_text(encoding="utf-8"))
+            self.assertEqual((quick_meta["max_turns"], quick_meta["timeout"], quick_meta["check"]), (6, 300, False))
+            self.assertNotIn("--check", quick_raw["argv"])
+
+            override_jobs = tmp / "override-jobs"
+            overridden = self.run_grb(
+                tmp,
+                "review",
+                "--profile",
+                "quick",
+                "--max-turns",
+                "45",
+                "--timeout",
+                "7200",
+                "--check",
+                "--jobs-dir",
+                str(override_jobs),
+                "explicit overrides",
+            )
+            self.assertEqual(overridden.returncode, 0, overridden.stderr)
+            override_job = next(override_jobs.iterdir())
+            override_meta = json.loads((override_job / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual((override_meta["max_turns"], override_meta["timeout"], override_meta["check"]), (45, 7200, True))
+            self.assertEqual(override_meta["check_strategy"], "prompt")
+            override_raw = json.loads((override_job / "raw.stdout").read_text(encoding="utf-8"))
+            self.assertNotIn("--check", override_raw["argv"])
+
+            no_check_jobs = tmp / "no-check-jobs"
+            no_check = self.run_grb(tmp, "review", "--no-check", "--jobs-dir", str(no_check_jobs), "force off")
+            self.assertEqual(no_check.returncode, 0, no_check.stderr)
+            no_check_job = next(no_check_jobs.iterdir())
+            no_check_meta = json.loads((no_check_job / "meta.json").read_text(encoding="utf-8"))
+            no_check_raw = json.loads((no_check_job / "raw.stdout").read_text(encoding="utf-8"))
+            self.assertFalse(no_check_meta["check"])
+            self.assertNotIn("--check", no_check_raw["argv"])
+
     def test_review_includes_git_context(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -349,8 +418,10 @@ class GrbTests(unittest.TestCase):
             self.assertEqual(continued.returncode, 0, continued.stderr)
             latest = sorted(jobs.iterdir())[-1]
             raw = json.loads((latest / "raw.stdout").read_text(encoding="utf-8"))
+            meta = json.loads((latest / "meta.json").read_text(encoding="utf-8"))
             self.assertIn("--resume", raw["argv"])
             self.assertIn("11111111-1111-4111-8111-111111111111", raw["argv"])
+            self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["check"]), ("full", 30, 3600, False))
 
             sessions = self.run_grb(tmp, "sessions", "--json")
             self.assertEqual(sessions.returncode, 0, sessions.stderr)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SKILL_DIR = ROOT / "plugins" / "grok-companion" / "skills" / "grok-companion"
 VALIDATOR = ROOT / "plugins" / "grok-companion" / "skills" / "grok-companion" / "scripts" / "validate.py"
 
 
@@ -41,6 +42,16 @@ class SkillContractTests(unittest.TestCase):
         proc = self.run_validator("validate")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("13 MCP tools", proc.stdout)
+
+    def test_skill_requires_full_context_wait_and_session_continuity(self):
+        skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        handling = (SKILL_DIR / "references" / "result-handling.md").read_text(encoding="utf-8")
+        combined = skill + "\n" + handling
+        self.assertIn("profile=full", combined)
+        self.assertIn("same `job_id`", combined)
+        self.assertIn("`grok_continue`", combined)
+        self.assertIn("Do not cancel or restart", combined)
+        self.assertNotIn("Call `grok_wait` once", combined)
 
 
 if __name__ == "__main__":

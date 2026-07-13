@@ -4,7 +4,7 @@
 
 让 **Codex** 把本机 **Grok CLI** 当作完整的外部协作者使用。
 
-Grok Companion v0.3.0 是一个带 13 个原生 MCP 工具的 Codex plugin。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带有界等待的后台 job 管理。
+Grok Companion v0.3.1 是一个带 13 个原生 MCP 工具的 Codex plugin。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带有界等待的后台 job 管理。
 
 > **这不是 Codex 侧边栏终端。**
 >
@@ -26,7 +26,7 @@ Grok Companion v0.3.0 是一个带 13 个原生 MCP 工具的 Codex plugin。Cod
 | 续聊 | `grok_continue` | `continue` | 按 session、companion job 或最近可恢复 job 续写 |
 | Session 发现 | `grok_sessions` | `sessions` | 列出或搜索本机 Grok CLI sessions |
 | 状态 | `grok_status` | `status` | 非阻塞查看近期或指定 job |
-| 有界等待 | `grok_wait` | `wait` | 等待一次至终态并返回结果，避免反复轮询 |
+| 有界等待 | `grok_wait` | `wait` | 单次有界等待；未完成时继续等待同一 job |
 | 结果 | `grok_result` | `result` | 读取已存储结果 |
 | 取消 | `grok_cancel` | `cancel` | 终止后台 runner 及其子进程 |
 
@@ -62,7 +62,7 @@ MCP server 仅使用 Python 标准库，不需要额外安装 pip 包。
 Codex 调用 grok_review / grok_research / grok_continue / ...
         -> 立即返回 job_id
         -> 本机后台运行 grok
-        -> grok_wait 有界等待一次
+        -> grok_wait 分段有界等待
         -> 终态时直接返回 stored result
 ```
 
@@ -72,11 +72,21 @@ Codex 调用 grok_review / grok_research / grok_continue / ...
 
 1. `grok_setup` 检查环境。
 2. 调用 `grok_review`、`grok_consult` 或其他启动工具，获得 `job_id`。
-3. 调用一次 `grok_wait`，默认最多等待 90 秒。
-4. 若返回 `completed: false`，保留同一 `job_id`，不要静默重启任务。
-5. 需要提前停止时调用 `grok_cancel`。
+3. 调用 `grok_wait`，默认每次最多等待 90 秒。
+4. 若返回 `completed: false`，继续用同一 `job_id` 调用 `grok_wait`；不要取消或重启任务。
+5. 只有用户明确要求或存在真实运行原因时才调用 `grok_cancel`。
 
 每次 MCP 调用都要使用当前 Codex workspace 的绝对路径作为 `cwd`。同一 job 的 `cwd` 和可选 `jobs_dir` 必须保持一致。
+
+## Full 与 Quick
+
+正式 Grok 协作默认使用 `profile=full`：`max_turns=30`、job runtime `timeout=3600` 秒。`review`、`adversarial-review` 和 `research` 在 full 下默认开启 Grok 自检。这个默认值用于让 Grok 完整探索、检查并返回结论，不应为了迁就 Codex 的单次等待窗口而主动缩短。
+
+`profile=quick` 是显式轻量模式：`max_turns=6`、job runtime `timeout=300` 秒、不自动开启自检。它适合连通性 smoke、固定短答案或用户明确要求的快速调用。
+
+显式 `max_turns`、`timeout`、`check` 会覆盖 profile。CLI 同时支持 `--check` 和 `--no-check`；MCP 的 `check: true|false` 也是显式覆盖。Grok CLI 当前不允许 `--check` 与 `--json-schema` 同时使用，因此结构化 review 在 prompt 内执行 schema-safe 自检，research 使用原生 `--check`。job metadata 的 `check_strategy` 会记录 `prompt`、`native` 或 `off`。
+
+这里启动工具的 `timeout` 是整个 Grok job 的运行预算，`grok_wait` 的 `timeout` 只是单次等待窗口，最长 300 秒，不会停止后台 job。
 
 ## 结构化 Review
 
@@ -119,6 +129,7 @@ python3 plugins/grok-companion/scripts/grb.py consult --include-git-context "这
 python3 plugins/grok-companion/scripts/grb.py review --base main "审查当前分支"
 python3 plugins/grok-companion/scripts/grb.py adversarial-review --base main "挑战架构与风险"
 python3 plugins/grok-companion/scripts/grb.py research --background "调研可选方案"
+python3 plugins/grok-companion/scripts/grb.py ask --profile quick "只回复 READY"
 python3 plugins/grok-companion/scripts/grb.py wait <job-id> --timeout 120 --json
 python3 plugins/grok-companion/scripts/grb.py sessions --json
 python3 plugins/grok-companion/scripts/grb.py continue --background --job-id <job-id> "深挖第二个风险"
@@ -129,7 +140,7 @@ python3 plugins/grok-companion/scripts/grb.py cancel <job-id>
 
 MCP 启动工具固定后台；CLI 默认前台，长任务需要显式添加 `--background`。
 
-常用参数包括 `--base`、`--include-git-context`、`--jobs-dir`、`--model`、`--effort`、`--max-turns`、`--timeout`、`--tools`、`--disallowed-tools`、`--best-of-n` 和 `--session-id`。
+常用参数包括 `--profile full|quick`、`--base`、`--include-git-context`、`--jobs-dir`、`--model`、`--effort`、`--max-turns`、`--timeout`、`--check`、`--no-check`、`--tools`、`--disallowed-tools`、`--best-of-n` 和 `--session-id`。
 
 未指定 `--base` 时，审查覆盖 working tree + index，包括 unstaged、staged，以及受上下文预算限制的未跟踪文本文件。
 
