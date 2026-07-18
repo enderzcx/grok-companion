@@ -31,4 +31,5 @@
 - MCP unavailable: use the bundled CLI fallback over the same runtime.
 - Authentication or model discovery failure: call `grok_setup` and report the exact failing check.
 - Job timeout or non-zero exit: preserve partial output and the stderr tail; do not silently rerun with a different model.
+- `grb_terminated_by_signal`: preserve the signal number and name, then inspect the same `cwd` / `jobs_dir` for an existing job before retrying. `SIGKILL` (`-9`) is a host/process termination, not a Grok job timeout, and blind retry can duplicate a job.
 - Missing session: use `grok_sessions` or start a fresh task only after saying continuity could not be recovered.

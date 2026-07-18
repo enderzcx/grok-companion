@@ -2,6 +2,12 @@
 
 All notable changes to Grok Companion are documented here.
 
+## 0.4.1 - 2026-07-18
+
+- Report negative `grb` return codes as structured process-signal diagnostics, including `SIGKILL` for `-9`.
+- Mark signal-terminated launch calls as unsafe to retry blindly and direct callers to check durable jobs before relaunching.
+- Verify compatibility with Grok CLI 0.2.103.
+
 ## 0.4.0 - 2026-07-13
 
 - Add `grok_monitor`, a native MCP tool that renders a responsive Codex inline Job Monitor from durable job state.

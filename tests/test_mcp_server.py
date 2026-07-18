@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -8,6 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from test_grb import make_fake_grok
 
@@ -15,6 +17,14 @@ from test_grb import make_fake_grok
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "plugins" / "grok-companion" / "scripts" / "mcp_server.py"
 MCP_CONFIG = ROOT / "plugins" / "grok-companion" / ".mcp.json"
+
+
+def load_server_module():
+    spec = importlib.util.spec_from_file_location("grok_companion_mcp_server", SERVER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class McpClient:
@@ -58,6 +68,48 @@ class McpClient:
 
 
 class McpServerTests(unittest.TestCase):
+    def test_negative_returncode_reports_termination_signal(self):
+        payload = load_server_module().terminated_process_payload(-9)
+        self.assertEqual(payload["error"], "grb_terminated_by_signal")
+        self.assertEqual(payload["returncode"], -9)
+        self.assertEqual(payload["signal"], 9)
+        self.assertEqual(payload["signal_name"], "SIGKILL")
+        self.assertFalse(payload["retry_safe"])
+        self.assertIn("not a Grok job timeout", payload["message"])
+
+    def test_nonnegative_returncode_has_no_signal_diagnostic(self):
+        server = load_server_module()
+        self.assertIsNone(server.terminated_process_payload(0))
+        self.assertIsNone(server.terminated_process_payload(1))
+
+    def test_signal_termination_flows_through_mcp_result(self):
+        for stdout in ("", '{"job_id":'):
+            with self.subTest(stdout=stdout):
+                server = load_server_module()
+                completed = subprocess.CompletedProcess([], -9, stdout=stdout, stderr="killed")
+                with mock.patch.object(server.subprocess, "run", return_value=completed):
+                    code, payload, raw_stdout, stderr = server.invoke_grb(ROOT, ["ask"])
+                result = server.tool_result(code, payload, raw_stdout, stderr)
+                self.assertTrue(result["isError"])
+                self.assertEqual(result["structuredContent"]["error"], "grb_terminated_by_signal")
+                self.assertEqual(result["structuredContent"]["signal_name"], "SIGKILL")
+                self.assertFalse(result["structuredContent"]["retry_safe"])
+                if stdout:
+                    self.assertEqual(result["structuredContent"]["stdout_tail"], stdout)
+
+    def test_signal_termination_preserves_parsed_job_fields(self):
+        server = load_server_module()
+        stdout = json.dumps({"job_id": "job-123", "status": "running"})
+        completed = subprocess.CompletedProcess([], -9, stdout=stdout, stderr="")
+        with mock.patch.object(server.subprocess, "run", return_value=completed):
+            code, payload, raw_stdout, stderr = server.invoke_grb(ROOT, ["ask"])
+        result = server.tool_result(code, payload, raw_stdout, stderr)
+        self.assertTrue(result["isError"])
+        self.assertEqual(result["structuredContent"]["job_id"], "job-123")
+        self.assertEqual(result["structuredContent"]["status"], "failed")
+        self.assertEqual(result["structuredContent"]["signal_name"], "SIGKILL")
+        self.assertFalse(result["structuredContent"]["retry_safe"])
+
     def make_client(
         self,
         tmp: Path,

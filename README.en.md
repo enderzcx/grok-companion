@@ -4,7 +4,7 @@
 
 Use the local **Grok CLI** as a full external collaborator inside **Codex**.
 
-Grok Companion v0.4.0 is a Codex plugin with 14 native MCP tools for consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
+Grok Companion v0.4.1 is a Codex plugin with 14 native MCP tools for consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
 
 > **This is not a Codex sidebar terminal.**
 >
@@ -76,6 +76,8 @@ Typical flow:
 3. Call `grok_wait` with a bounded timeout.
 4. If it returns `completed: false`, call `grok_wait` again with the same `job_id`; do not cancel or restart the task.
 5. Use `grok_cancel` only on explicit user direction or for a real operational reason.
+
+If MCP returns `grb_terminated_by_signal`, `signal_name=SIGKILL` corresponds to the common shell return code `-9`: the local `grb` child was forcibly terminated by the OS or host, not by the Grok job timeout. Check the same `cwd` / `jobs_dir` for an existing job first. Retry only after confirming that no job was created, and restart Codex App if needed to rebuild the MCP process.
 
 Every MCP call requires the absolute current workspace path as `cwd`. Keep `cwd` and an optional `jobs_dir` consistent for the same job.
 

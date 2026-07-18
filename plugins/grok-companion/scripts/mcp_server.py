@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -15,7 +16,7 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.4.0"
+SERVER_VERSION = "0.4.1"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
@@ -242,6 +243,29 @@ def add_option(cmd: list[str], args: dict[str, Any], key: str, flag: str | None 
         cmd.extend([option, str(value)])
 
 
+def terminated_process_payload(returncode: int) -> dict[str, Any] | None:
+    if returncode >= 0:
+        return None
+    signal_number = -returncode
+    try:
+        signal_name = signal.Signals(signal_number).name
+    except ValueError:
+        signal_name = f"SIGNAL_{signal_number}"
+    return {
+        "status": "failed",
+        "error": "grb_terminated_by_signal",
+        "returncode": returncode,
+        "signal": signal_number,
+        "signal_name": signal_name,
+        "retry_safe": False,
+        "message": (
+            f"grb was terminated by signal {signal_number} ({signal_name}) before it completed cleanly. "
+            "This is not a Grok job timeout. Check the same cwd and jobs_dir for an existing job before "
+            "retrying; if no job exists, restart Codex App to rebuild the MCP process."
+        ),
+    }
+
+
 def invoke_grb(cwd: Path, args: list[str]) -> tuple[int, Any, str, str]:
     proc = subprocess.run(
         [sys.executable, str(GRB), *args],
@@ -258,6 +282,14 @@ def invoke_grb(cwd: Path, args: list[str]) -> tuple[int, Any, str, str]:
             payload = json.loads(stdout)
         except json.JSONDecodeError:
             pass
+    terminated = terminated_process_payload(proc.returncode)
+    if terminated is not None:
+        if isinstance(payload, dict):
+            payload = {**payload, **terminated}
+        else:
+            if stdout:
+                terminated["stdout_tail"] = stdout[-4000:]
+            payload = terminated
     return proc.returncode, payload, stdout, stderr
 
 

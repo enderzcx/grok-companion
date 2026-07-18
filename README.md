@@ -4,7 +4,7 @@
 
 让 **Codex** 把本机 **Grok CLI** 当作完整的外部协作者使用。
 
-Grok Companion v0.4.0 是一个带 14 个原生 MCP 工具的 Codex plugin。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
+Grok Companion v0.4.1 是一个带 14 个原生 MCP 工具的 Codex plugin。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
 
 > **这不是 Codex 侧边栏终端。**
 >
@@ -76,6 +76,8 @@ Codex 调用 grok_review / grok_research / grok_continue / ...
 3. 调用 `grok_wait`，默认每次最多等待 90 秒。
 4. 若返回 `completed: false`，继续用同一 `job_id` 调用 `grok_wait`；不要取消或重启任务。
 5. 只有用户明确要求或存在真实运行原因时才调用 `grok_cancel`。
+
+若 MCP 返回 `grb_terminated_by_signal`，其中 `signal_name=SIGKILL` 对应 shell 常见的退出码 `-9`：这表示本机 `grb` 子进程被系统或宿主强制终止，并不等于 Grok job 自身超时。先在相同 `cwd` / `jobs_dir` 检查是否已有 job；只有确认没有创建 job 后才重试，必要时重启 Codex App 以重建 MCP 进程。
 
 每次 MCP 调用都要使用当前 Codex workspace 的绝对路径作为 `cwd`。同一 job 的 `cwd` 和可选 `jobs_dir` 必须保持一致。
 

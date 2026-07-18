@@ -23,7 +23,7 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 DEFAULT_PROFILE = "full"
 PROFILE_DEFAULTS = {
     "full": {"max_turns": 30, "timeout": 3600},
