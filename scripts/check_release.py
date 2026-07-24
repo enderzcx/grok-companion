@@ -21,6 +21,7 @@ def fail(message: str) -> None:
 
 def main() -> int:
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    marketplace = json.loads((ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8"))
     grb = (PLUGIN / "scripts" / "grb.py").read_text(encoding="utf-8")
     server = (PLUGIN / "scripts" / "mcp_server.py").read_text(encoding="utf-8")
     skill = (PLUGIN / "skills" / "grok-companion" / "SKILL.md").read_text(encoding="utf-8")
@@ -29,6 +30,20 @@ def main() -> int:
     monitor_template = PLUGIN / "skills" / "grok-companion" / "templates" / "job-monitor.html"
 
     version = manifest["version"]
+    marketplace_name = marketplace.get("name")
+    plugin_name = manifest.get("name")
+    if not isinstance(marketplace_name, str) or not marketplace_name:
+        fail("marketplace name is missing")
+    if marketplace_name == plugin_name:
+        fail("marketplace and plugin names must differ to avoid duplicate cache path segments")
+    current_selector = f"{plugin_name}@{marketplace_name}"
+    legacy_selector = f"{plugin_name}@{plugin_name}"
+    for readme in (ROOT / "README.md", ROOT / "README.en.md"):
+        readme_text = readme.read_text(encoding="utf-8")
+        if current_selector not in readme_text:
+            fail(f"{readme.name} does not contain current install selector {current_selector}")
+        if readme_text.count(legacy_selector) != 1:
+            fail(f"{readme.name} must contain legacy selector exactly once in migration removal instructions")
     for label, text, pattern in (
         ("grb", grb, r'^VERSION = "([^"]+)"$'),
         ("mcp server", server, r'^SERVER_VERSION = "([^"]+)"$'),

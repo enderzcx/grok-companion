@@ -2,6 +2,12 @@
 
 All notable changes to Grok Companion are documented here.
 
+## 0.4.2 - 2026-07-24
+
+- Represent an incomplete `grok_wait` as pending with `job_ok: null` and `next_action: wait_same_job`, so agents do not mistake a bounded wait for a failed Grok job.
+- Rename the marketplace id to `enderzcx`, avoiding the repeated `grok-companion/grok-companion/<version>` cache path that caused agents to drop one path segment while reading the installed skill.
+- Keep terminal failures explicit: only completed jobs can return `job_ok: false`.
+
 ## 0.4.1 - 2026-07-18
 
 - Report negative `grb` return codes as structured process-signal diagnostics, including `SIGKILL` for `-9`.

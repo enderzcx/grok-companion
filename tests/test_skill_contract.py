@@ -50,6 +50,8 @@ class SkillContractTests(unittest.TestCase):
         combined = skill + "\n" + handling
         self.assertIn("profile=full", combined)
         self.assertIn("same `job_id`", combined)
+        self.assertIn("`job_ok: null`", combined)
+        self.assertIn("wait_same_job", combined)
         self.assertIn("`grok_continue`", combined)
         self.assertIn("Do not cancel or restart", combined)
         self.assertNotIn("Call `grok_wait` once", combined)

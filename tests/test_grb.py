@@ -445,7 +445,36 @@ class GrbTests(unittest.TestCase):
             payload = json.loads(waited.stdout)
             self.assertTrue(payload["completed"])
             self.assertEqual(payload["status"], "complete")
+            self.assertIs(payload["job_ok"], True)
+            self.assertEqual(payload["next_action"], "read_result")
             self.assertIn("FAKE GROK RESULT", payload["result"]["text"])
+
+    def test_wait_marks_running_job_as_pending_not_failed(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            launch = self.run_grb(
+                tmp,
+                "ask",
+                "--jobs-dir",
+                str(jobs),
+                "--background",
+                "keep running",
+                extra_env={"GROK_FAKE_SLEEP": "2"},
+            )
+            job_id = json.loads(launch.stdout)["job_id"]
+            waited = subprocess.run(
+                [sys.executable, str(GRB), "wait", job_id, "--jobs-dir", str(jobs), "--timeout", "0", "--json"],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            self.assertEqual(waited.returncode, 0, waited.stderr)
+            payload = json.loads(waited.stdout)
+            self.assertFalse(payload["completed"])
+            self.assertIsNone(payload["job_ok"])
+            self.assertEqual(payload["next_action"], "wait_same_job")
 
     def test_sessions_and_continue_resume_discovered_job_session(self):
         with tempfile.TemporaryDirectory() as td:
@@ -534,7 +563,8 @@ class GrbTests(unittest.TestCase):
             )
             payload = json.loads(waited.stdout)
             self.assertTrue(payload["completed"])
-            self.assertTrue(payload["job_ok"])
+            self.assertIs(payload["job_ok"], True)
+            self.assertEqual(payload["next_action"], "read_result")
             self.assertEqual(payload["result"]["text"], "saved")
 
             unknown = jobs / "job-unknown"
@@ -561,7 +591,8 @@ class GrbTests(unittest.TestCase):
             unknown_payload = json.loads(unknown_wait.stdout)
             self.assertNotEqual(unknown_wait.returncode, 0)
             self.assertTrue(unknown_payload["completed"])
-            self.assertFalse(unknown_payload["job_ok"])
+            self.assertIs(unknown_payload["job_ok"], False)
+            self.assertEqual(unknown_payload["next_action"], "inspect_failure")
             self.assertEqual(unknown_payload["status"], "unknown")
             unknown_meta = json.loads((unknown / "meta.json").read_text(encoding="utf-8"))
             self.assertIsNotNone(unknown_meta["finished_at"])

@@ -16,7 +16,7 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.4.1"
+SERVER_VERSION = "0.4.2"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
@@ -196,7 +196,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "grok_wait",
-        "description": "Perform one bounded wait for a Grok job. If incomplete, call grok_wait again with the same job_id; never restart or cancel merely because a wait elapsed.",
+        "description": "Perform one bounded wait for a Grok job. An incomplete response has job_ok=null and next_action=wait_same_job; call grok_wait again with the same job_id and never restart or cancel merely because a wait elapsed.",
         "inputSchema": object_schema(
             {
                 "cwd": CWD,
@@ -475,7 +475,8 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                     "instructions": (
                         "Grok launch tools always use background jobs. Pass the current workspace as cwd, "
                         "then repeat bounded grok_wait calls with the same job_id until terminal. An incomplete wait "
-                        "does not justify cancellation or restart. Full is the default runtime profile; quick is opt-in. "
+                        "uses job_ok=null and next_action=wait_same_job; it does not justify cancellation or restart. "
+                        "Only terminal job_ok=false is a job failure. Full is the default runtime profile; quick is opt-in. "
                         "Use grok_monitor for a refreshable inline job snapshot, and grok_sessions plus grok_continue "
                         "for continuity. Use superx for exact X/Twitter retrieval."
                     ),

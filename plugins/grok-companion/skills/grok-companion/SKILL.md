@@ -22,7 +22,7 @@ For exact X/Twitter URLs, posts, accounts, threads, articles, search, or X-nativ
 3. Use `profile=full` by default. It resolves to 30 turns and a 3600-second job runtime; review, adversarial review, and research also self-check. Do not lower these budgets merely to fit the current Codex turn.
 4. Use `profile=quick` only for a connectivity smoke, a deliberately small fixed-answer task, or an explicit user request. It resolves to 6 turns, 300 seconds, and no automatic self-check.
 5. Launch tools return a background `job_id`.
-6. Call `grok_wait` with a bounded timeout. If it returns `completed: false`, call it again with the same `job_id`. Avoid tight `grok_status` polling.
+6. Call `grok_wait` with a bounded timeout. If it returns `completed: false`, it will also return `job_ok: null` and `next_action: wait_same_job`; call it again with the same `job_id`. Avoid tight `grok_status` polling.
 7. When the user wants to see Grok working, call `grok_monitor` with the job and an absolute `.html` path in the current Codex visualization directory, then present that file as an inline visualization. Refreshing renders a new snapshot; it is not a live token stream.
 8. Follow [references/result-handling.md](references/result-handling.md) when presenting or accepting results.
 9. Use the bundled `scripts/grb.py` CLI only when MCP is unavailable or foreground execution is specifically required.
@@ -71,7 +71,7 @@ It exposes only `SKILL.md`, `references/`, `templates/`, and `evals/`; it refuse
 ## Output Contract
 
 - Launch calls return a durable `job_id`; preserve it until the task reaches a terminal state.
-- `grok_wait` returns `completed`, `job_ok`, `status`, and the stored `result` when terminal. A bounded wait timeout is not a job failure; continue waiting on the same job. A terminal `job_ok: false` is a failure.
+- `grok_wait` returns `completed`, `job_ok`, `next_action`, `status`, and the stored `result` when terminal. A bounded wait timeout is not a job failure: incomplete jobs use `job_ok: null` and `next_action: wait_same_job`. A terminal `job_ok: false` is a failure.
 - Review results preserve `verdict`, `summary`, ordered `findings`, and `next_steps` from the public JSON schema.
 - Failures preserve exact status, partial output, contract errors, and stderr evidence. Do not substitute a different model or collaborator silently.
 

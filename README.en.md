@@ -4,7 +4,7 @@
 
 Use the local **Grok CLI** as a full external collaborator inside **Codex**.
 
-Grok Companion v0.4.1 is a Codex plugin with 14 native MCP tools for consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
+Grok Companion v0.4.2 is a Codex plugin with 14 native MCP tools for consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
 
 > **This is not a Codex sidebar terminal.**
 >
@@ -74,7 +74,7 @@ Typical flow:
 1. Run `grok_setup` when environment or authentication needs checking.
 2. Launch `grok_review`, `grok_consult`, or another task and keep the returned `job_id`.
 3. Call `grok_wait` with a bounded timeout.
-4. If it returns `completed: false`, call `grok_wait` again with the same `job_id`; do not cancel or restart the task.
+4. If it returns `completed: false`, `job_ok` is `null` and `next_action` is `wait_same_job`; call `grok_wait` again with the same `job_id` and do not cancel or restart the task.
 5. Use `grok_cancel` only on explicit user direction or for a real operational reason.
 
 If MCP returns `grb_terminated_by_signal`, `signal_name=SIGKILL` corresponds to the common shell return code `-9`: the local `grb` child was forcibly terminated by the OS or host, not by the Grok job timeout. Check the same `cwd` / `jobs_dir` for an existing job first. Retry only after confirming that no job was created, and restart Codex App if needed to rebuild the MCP process.
@@ -182,7 +182,7 @@ From the public repository:
 
 ```bash
 codex plugin marketplace add enderzcx/grok-companion --sparse .agents --sparse plugins/grok-companion
-codex plugin add grok-companion@grok-companion
+codex plugin add grok-companion@enderzcx
 ```
 
 For local development:
@@ -191,10 +191,19 @@ For local development:
 git clone https://github.com/enderzcx/grok-companion.git
 cd grok-companion
 codex plugin marketplace add "$PWD"
-codex plugin add grok-companion@grok-companion
+codex plugin add grok-companion@enderzcx
 ```
 
 Start a new Codex task after installing or updating. An already open task will not automatically gain newly installed skills and MCP tools.
+
+For v0.4.1 and earlier, the marketplace id was `grok-companion`. Migrate the old registration before reinstalling with `@enderzcx`, otherwise the legacy cache can retain the duplicated name segment:
+
+```bash
+codex plugin remove grok-companion@grok-companion
+codex plugin marketplace remove grok-companion
+codex plugin marketplace add enderzcx/grok-companion --sparse .agents --sparse plugins/grok-companion
+codex plugin add grok-companion@enderzcx
+```
 
 Environment checks:
 

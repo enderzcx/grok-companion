@@ -4,7 +4,7 @@
 
 1. Keep the returned `job_id`.
 2. Call `grok_wait` with a bounded wait budget. Do not repeatedly call `grok_status` in a tight loop.
-3. If `grok_wait` returns `completed: false`, preserve the same `job_id` and call `grok_wait` again. The wait budget is not the job runtime budget.
+3. If `grok_wait` returns `completed: false`, it also returns `job_ok: null` and `next_action: wait_same_job`. Preserve the same `job_id` and call `grok_wait` again. The wait budget is not the job runtime budget.
 4. If it returns `completed: true` with `job_ok: false`, treat the terminal job as failed, timed out, cancelled, or unrecoverable even though the wait operation itself completed.
 5. When complete and `job_ok: true`, present the stored result. Do not restart the same task unless the user asks for a fresh run.
 6. Do not cancel or restart an incomplete job just to fit a Codex turn. If execution must hand off, report the preserved `job_id` and leave the job running.

@@ -4,7 +4,7 @@
 
 让 **Codex** 把本机 **Grok CLI** 当作完整的外部协作者使用。
 
-Grok Companion v0.4.1 是一个带 14 个原生 MCP 工具的 Codex plugin。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
+Grok Companion v0.4.2 是一个带 14 个原生 MCP 工具的 Codex plugin。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
 
 > **这不是 Codex 侧边栏终端。**
 >
@@ -74,7 +74,7 @@ Codex 调用 grok_review / grok_research / grok_continue / ...
 1. `grok_setup` 检查环境。
 2. 调用 `grok_review`、`grok_consult` 或其他启动工具，获得 `job_id`。
 3. 调用 `grok_wait`，默认每次最多等待 90 秒。
-4. 若返回 `completed: false`，继续用同一 `job_id` 调用 `grok_wait`；不要取消或重启任务。
+4. 若返回 `completed: false`，此时 `job_ok` 为 `null`、`next_action` 为 `wait_same_job`；继续用同一 `job_id` 调用 `grok_wait`，不要取消或重启任务。
 5. 只有用户明确要求或存在真实运行原因时才调用 `grok_cancel`。
 
 若 MCP 返回 `grb_terminated_by_signal`，其中 `signal_name=SIGKILL` 对应 shell 常见的退出码 `-9`：这表示本机 `grb` 子进程被系统或宿主强制终止，并不等于 Grok job 自身超时。先在相同 `cwd` / `jobs_dir` 检查是否已有 job；只有确认没有创建 job 后才重试，必要时重启 Codex App 以重建 MCP 进程。
@@ -182,7 +182,7 @@ Companion skill 只在用户明确要求 Grok 协作，或已在管理 Grok Comp
 
 ```bash
 codex plugin marketplace add enderzcx/grok-companion --sparse .agents --sparse plugins/grok-companion
-codex plugin add grok-companion@grok-companion
+codex plugin add grok-companion@enderzcx
 ```
 
 本地开发：
@@ -191,10 +191,19 @@ codex plugin add grok-companion@grok-companion
 git clone https://github.com/enderzcx/grok-companion.git
 cd grok-companion
 codex plugin marketplace add "$PWD"
-codex plugin add grok-companion@grok-companion
+codex plugin add grok-companion@enderzcx
 ```
 
 安装或更新后请新开一个 Codex task。已经打开的 task 不会自动获得新安装的 skill 和 MCP 工具。
+
+若已安装 v0.4.1 或更早版本，旧 marketplace id 为 `grok-companion`。升级时先迁移旧注册，再按上面的 `@enderzcx` 命令重新安装，避免旧缓存继续生成双层同名路径：
+
+```bash
+codex plugin remove grok-companion@grok-companion
+codex plugin marketplace remove grok-companion
+codex plugin marketplace add enderzcx/grok-companion --sparse .agents --sparse plugins/grok-companion
+codex plugin add grok-companion@enderzcx
+```
 
 环境检查：
 

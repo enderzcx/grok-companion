@@ -231,6 +231,8 @@ class McpServerTests(unittest.TestCase):
                 self.assertFalse(wait_response["isError"])
                 self.assertTrue(wait_response["structuredContent"]["completed"])
                 self.assertEqual(wait_response["structuredContent"]["status"], "complete")
+                self.assertIs(wait_response["structuredContent"]["job_ok"], True)
+                self.assertEqual(wait_response["structuredContent"]["next_action"], "read_result")
 
                 result = client.request(
                     "tools/call",
@@ -259,6 +261,39 @@ class McpServerTests(unittest.TestCase):
                 prompt = (jobs / job_id / "prompt.md").read_text(encoding="utf-8")
                 self.assertIn("-hello from MCP", prompt)
                 self.assertNotIn("## Task\n\n-- -hello", prompt)
+            finally:
+                client.close()
+
+    def test_incomplete_wait_is_pending_not_mcp_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            client = self.make_client(tmp, sleep=2)
+            try:
+                self.initialize(client)
+                launch = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_ask",
+                        "arguments": {"cwd": str(tmp), "jobs_dir": str(jobs), "task": "slow"},
+                    },
+                )["result"]["structuredContent"]
+                waited = client.request(
+                    "tools/call",
+                    {
+                        "name": "grok_wait",
+                        "arguments": {
+                            "cwd": str(tmp),
+                            "jobs_dir": str(jobs),
+                            "job_id": launch["job_id"],
+                            "timeout": 0,
+                        },
+                    },
+                )["result"]
+                self.assertFalse(waited["isError"])
+                self.assertFalse(waited["structuredContent"]["completed"])
+                self.assertIsNone(waited["structuredContent"]["job_ok"])
+                self.assertEqual(waited["structuredContent"]["next_action"], "wait_same_job")
             finally:
                 client.close()
 
@@ -429,7 +464,8 @@ class McpServerTests(unittest.TestCase):
                 )["result"]
                 self.assertTrue(waited["isError"])
                 self.assertTrue(waited["structuredContent"]["completed"])
-                self.assertFalse(waited["structuredContent"]["job_ok"])
+                self.assertIs(waited["structuredContent"]["job_ok"], False)
+                self.assertEqual(waited["structuredContent"]["next_action"], "inspect_failure")
                 self.assertEqual(waited["structuredContent"]["status"], "failed")
             finally:
                 client.close()

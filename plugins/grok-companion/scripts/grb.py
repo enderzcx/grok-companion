@@ -23,7 +23,7 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 DEFAULT_PROFILE = "full"
 PROFILE_DEFAULTS = {
     "full": {"max_turns": 30, "timeout": 3600},
@@ -1238,11 +1238,13 @@ def command_wait(args: argparse.Namespace) -> int:
         time.sleep(args.poll_interval)
         meta = refresh_job_meta(job_dir)
     completed = meta.get("status") in TERMINAL_STATUSES
+    job_ok = meta.get("status") == "complete" if completed else None
     payload = {
         "job_id": meta["job_id"],
         "status": meta.get("status"),
         "completed": completed,
-        "job_ok": meta.get("status") == "complete",
+        "job_ok": job_ok,
+        "next_action": "read_result" if job_ok else ("inspect_failure" if completed else "wait_same_job"),
         "waited_seconds": round(time.monotonic() - started, 3),
         "job_dir": str(job_dir),
         "result": load_result_payload(job_dir) if completed else None,
