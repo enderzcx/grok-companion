@@ -72,8 +72,29 @@ def main() -> int:
     for route in ("superx", "native-review", "named-other-collaborator"):
         if not any(case.get("route") == route and case.get("should_trigger") is False for case in cases):
             fail(f"trigger evals missing negative route: {route}")
+    if not any(
+        case.get("activation") == "host-policy"
+        and case.get("route") == "grok_delegate"
+        and case.get("should_trigger") is True
+        and case.get("expects_route_marker") is True
+        for case in cases
+    ):
+        fail("trigger evals missing visible host-policy delegation route")
+    if not any(
+        case.get("activation") == "host-policy-disqualified"
+        and case.get("should_trigger") is False
+        and case.get("expects_skip_reason") is True
+        for case in cases
+    ):
+        fail("trigger evals missing host-policy disqualifier with skip receipt")
 
-    if "explicitly asks" not in skill or "exact X/Twitter" not in skill or "generic code review" not in skill:
+    if (
+        "explicitly asks" not in skill
+        or "active host policy" not in skill
+        or "🧭 route:" not in skill
+        or "exact X/Twitter" not in skill
+        or "generic code review" not in skill
+    ):
         fail("skill frontmatter/body is missing trigger or exclusion language")
     if schema.get("required") != ["verdict", "summary", "findings", "next_steps"]:
         fail("review schema required fields drifted")

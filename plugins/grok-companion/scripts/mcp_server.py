@@ -16,7 +16,7 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.4.2"
+SERVER_VERSION = "0.4.3"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
@@ -120,7 +120,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "grok_delegate",
-        "description": "Delegate a bounded task to the full local Grok CLI. This may use tools or edit files; invoke only when the user authorized delegation.",
+        "description": "Delegate a bounded task to the full local Grok CLI. This may use tools or edit files; invoke only when the user or an active host policy authorized the exact write boundary.",
         "inputSchema": launch_schema(git_context=True, base=True),
     },
     {

@@ -62,8 +62,24 @@ def validate() -> int:
         fail("routing evals need positive cases")
     if not any(case.get("should_trigger") is False for case in cases):
         fail("routing evals need negative cases")
+    if not any(
+        case.get("activation") == "host-policy"
+        and case.get("route") == "grok_delegate"
+        and case.get("should_trigger") is True
+        for case in cases
+    ):
+        fail("routing evals need a pre-authorized host-policy delegation case")
+    if not any(
+        case.get("activation") == "host-policy-disqualified"
+        and case.get("should_trigger") is False
+        and case.get("expects_skip_reason") is True
+        for case in cases
+    ):
+        fail("routing evals need host-policy disqualifier cases with skip reasons")
     if "Use when" not in skill or "Not for" not in skill:
         fail("skill frontmatter is missing explicit trigger or exclusion language")
+    if "active host policy" not in skill or "🧭 route:" not in skill:
+        fail("skill is missing host-policy activation or route-receipt language")
     if schema.get("required") != ["verdict", "summary", "findings", "next_steps"]:
         fail("review schema required fields drifted")
     if not set(schema["required"]).issubset(template):

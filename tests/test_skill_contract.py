@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import unittest
@@ -55,6 +56,33 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("`grok_continue`", combined)
         self.assertIn("Do not cancel or restart", combined)
         self.assertNotIn("Call `grok_wait` once", combined)
+
+    def test_skill_supports_opt_in_host_policy_routing(self):
+        skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        routing = (SKILL_DIR / "references" / "routing.md").read_text(encoding="utf-8")
+        combined = skill + "\n" + routing
+        self.assertIn("active host policy", combined)
+        self.assertIn("pre-authorizes automatic collaborator selection", combined)
+        self.assertIn("🧭 route:", combined)
+        self.assertIn("general task complexity is not authorization", combined)
+        self.assertIn("exact allowed writes", combined)
+
+    def test_trigger_evals_cover_policy_selection_and_disqualifiers(self):
+        cases = json.loads(
+            (SKILL_DIR / "evals" / "trigger_cases.json").read_text(encoding="utf-8")
+        )["cases"]
+        implicit_delegate = next(case for case in cases if case["id"] == "host-policy-bounded-builder")
+        self.assertTrue(implicit_delegate["should_trigger"])
+        self.assertEqual(implicit_delegate["route"], "grok_delegate")
+        self.assertTrue(implicit_delegate["expects_route_marker"])
+        self.assertNotIn("Grok", implicit_delegate["prompt"])
+
+        disqualified = [
+            case for case in cases if case.get("activation") == "host-policy-disqualified"
+        ]
+        self.assertGreaterEqual(len(disqualified), 3)
+        self.assertTrue(all(case["should_trigger"] is False for case in disqualified))
+        self.assertTrue(all(case["expects_skip_reason"] is True for case in disqualified))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ---
 name: grok-companion
-description: "Use when the user explicitly asks Codex to collaborate with Grok, get Grok's second opinion, run a Grok review or adversarial review, continue a Grok session, delegate a bounded task to Grok, research with Grok, or manage Grok Companion jobs. Not for generic code review or generic web research that does not name Grok, exact X/Twitter retrieval or search (use superx), another named AI collaborator, or requests for a sidebar terminal."
+description: "Use when the user explicitly asks Codex to collaborate with Grok, or when an active host policy has pre-authorized automatic collaborator selection and selects Grok for a bounded task. Supports second opinions, review, adversarial review, research, bounded delegation, session continuation, and job management. Not for generic code review or web research without either activation path, exact X/Twitter retrieval or search (use superx), another named AI collaborator, or requests for a sidebar terminal."
 metadata:
   short-description: Use Grok as a managed Codex collaborator
 ---
@@ -11,7 +11,12 @@ Use the local `grok` CLI as an external Codex collaborator through native MCP to
 
 ## Before Calling
 
-Read [references/routing.md](references/routing.md) when ownership is ambiguous. The key boundary is explicit intent: do not route ordinary review or research to Grok unless the user named Grok or is already managing a Grok Companion job.
+Read [references/routing.md](references/routing.md) when ownership is ambiguous. There are two activation paths:
+
+1. The user explicitly requests Grok collaboration or is already managing a Grok Companion job.
+2. An active host policy explicitly pre-authorizes automatic collaborator selection, the current task lead selects Grok, and the task satisfies that policy's bounded authority and acceptance rules.
+
+The second path is opt-in host behavior. Do not infer it merely because work is difficult, non-trivial, cross-file, or benefits from review. When the policy-selected path is used, emit `🧭 route: <lead> -> Grok <role> | reason: <short reason>` before launching the job.
 
 For exact X/Twitter URLs, posts, accounts, threads, articles, search, or X-native diagnostics, use `superx` instead.
 
@@ -49,7 +54,7 @@ It exposes only `SKILL.md`, `references/`, `templates/`, and `evals/`; it refuse
 - `grok_review`: structured, read-only code findings.
 - `grok_adversarial_review`: structured challenge of architecture and assumptions.
 - `grok_research`: source-aware general research.
-- `grok_delegate`: explicitly authorized bounded work that may edit files.
+- `grok_delegate`: bounded work authorized directly by the user or by an active host policy with an approved write boundary.
 - `grok_continue`: continue by `session_id`, prior companion `job_id`, or the latest resumable companion job.
 - `grok_sessions`: list or search Grok CLI sessions.
 - `grok_status`: inspect jobs without waiting.
@@ -64,13 +69,14 @@ It exposes only `SKILL.md`, `references/`, `templates/`, and `evals/`; it refuse
 - Give Grok the complete task and all relevant repository context available for the decision. For follow-up questions on the same problem, use `grok_continue` so the existing Grok session context is preserved.
 - Do not cancel or restart a running job merely because a bounded wait returned incomplete. Cancel only on explicit user direction or a real terminal/operational reason.
 - Do not auto-fix review findings. Codex verifies findings and owns edits, tests, commits, and release judgment.
-- `grok_delegate` may use tools or modify files. Invoke it only after explicit user authorization, then inspect the worktree and rerun checks.
+- `grok_delegate` may use tools or modify files. Invoke it only after direct user authorization or an active host policy that inherits a previously approved, exact write boundary. Then inspect the worktree and rerun checks.
 - If authentication or model discovery fails, call `grok_setup` and report the exact failing check. Do not silently switch providers or models.
 - Job artifacts live under `.grok-companion/jobs/<job-id>/` unless `jobs_dir` overrides it.
 
 ## Output Contract
 
 - Launch calls return a durable `job_id`; preserve it until the task reaches a terminal state.
+- Policy-selected calls preserve the route receipt, selected role, authorization source, allowed writes, and deterministic acceptance in the task handoff or final evidence packet.
 - `grok_wait` returns `completed`, `job_ok`, `next_action`, `status`, and the stored `result` when terminal. A bounded wait timeout is not a job failure: incomplete jobs use `job_ok: null` and `next_action: wait_same_job`. A terminal `job_ok: false` is a failure.
 - Review results preserve `verdict`, `summary`, ordered `findings`, and `next_steps` from the public JSON schema.
 - Failures preserve exact status, partial output, contract errors, and stderr evidence. Do not substitute a different model or collaborator silently.
@@ -90,4 +96,4 @@ python3 <plugin-root>/scripts/grb.py sessions --json
 python3 <plugin-root>/scripts/grb.py continue --background --job-id <job-id> "Dig deeper"
 ```
 
-`superx` remains the focused X/Twitter retrieval and X-native research layer. Grok Companion owns explicit general Grok collaboration; keep the surfaces separate.
+`superx` remains the focused X/Twitter retrieval and X-native research layer. Grok Companion owns explicit or host-policy-selected general Grok collaboration; keep the surfaces separate.

@@ -4,7 +4,7 @@
 
 Use the local **Grok CLI** as a full external collaborator inside **Codex**.
 
-Grok Companion v0.4.2 is a Codex plugin with 14 native MCP tools for consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
+Grok Companion v0.4.3 is a Codex plugin with 14 native MCP tools for consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
 
 > **This is not a Codex sidebar terminal.**
 >
@@ -157,7 +157,9 @@ Without `--base`, review covers the working tree plus index: unstaged, staged, a
 
 ## Routing Boundaries
 
-The skill triggers only when the user explicitly asks for Grok collaboration or is already managing a Grok Companion job. Generic review or research that does not name Grok, another named AI collaborator, and requests for a sidebar terminal are outside this plugin.
+The skill has two activation paths: the user explicitly requests Grok collaboration or is managing an existing job; or the host's active work contract has pre-authorized automatic collaborator selection and the task lead selects Grok for this bounded task. The second path is an opt-in host policy, not authority inferred from work being difficult, cross-file, or review-worthy. Generic review or research with neither activation path, another named AI collaborator, and requests for a sidebar terminal are outside this plugin.
+
+When a host policy selects Grok automatically, emit `🧭 route: <lead> -> Grok <role> | reason: <short reason>` before launch. File-changing work also requires exact allowed writes, deterministic acceptance, and a diff/test budget.
 
 | | superx | grok-companion |
 |---|---|---|
@@ -242,7 +244,7 @@ Foreground and background tasks write durable artifacts under the current git re
 - The Grok CLI also sends applicable prompts and context to xAI under the user's account and xAI terms.
 - Do not commit or share job directories containing secrets or customer data.
 - Review is a prompt-level read-only contract, not an OS sandbox.
-- Delegate uses the full local Grok CLI and may edit files. Invoke it only after explicit authorization, then inspect and verify all changes.
+- Delegate uses the full local Grok CLI and may edit files. Invoke it only after direct user authorization or when the host work contract inherits an exact write boundary the user already approved, then inspect and verify all changes.
 
 ## Architecture
 

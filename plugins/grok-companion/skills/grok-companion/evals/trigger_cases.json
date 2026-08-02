@@ -1,53 +1,112 @@
 {
-  "version": 1,
+  "version": 2,
   "skill": "grok-companion",
   "cases": [
     {
+      "id": "explicit-review",
       "prompt": "让 Grok review 当前改动",
       "should_trigger": true,
+      "activation": "explicit-user",
       "route": "grok_review"
     },
     {
+      "id": "explicit-consult",
       "prompt": "Ask Grok for a second opinion on this caching plan",
       "should_trigger": true,
+      "activation": "explicit-user",
       "route": "grok_consult"
     },
     {
+      "id": "explicit-continue",
       "prompt": "继续刚才那个 Grok 会话，让它深挖第二个风险",
       "should_trigger": true,
+      "activation": "existing-job",
       "route": "grok_continue"
     },
     {
+      "id": "explicit-wait",
       "prompt": "看看 Grok 后台任务结束没有",
       "should_trigger": true,
+      "activation": "existing-job",
       "route": "grok_wait"
     },
     {
+      "id": "host-policy-bounded-builder",
+      "context": "The active host contract pre-authorizes automatic collaborator selection. This is a medium-sized local implementation with exact allowed files, deterministic tests, no sensitive data, and no external writes or metered spend.",
+      "prompt": "实现当前任务合同中的解析器切片，限改列出的三个文件并跑指定测试；请自动选择最合适的 Builder。",
+      "should_trigger": true,
+      "activation": "host-policy",
+      "route": "grok_delegate",
+      "expects_route_marker": true
+    },
+    {
+      "id": "host-policy-independent-review",
+      "context": "The active host contract pre-authorizes automatic collaborator selection and has selected Grok for one bounded independent read-only review.",
+      "prompt": "review 当前 diff，按严重级别返回 findings。",
+      "should_trigger": true,
+      "activation": "host-policy",
+      "route": "grok_review",
+      "expects_route_marker": true
+    },
+    {
+      "id": "generic-review-no-policy",
       "prompt": "review 当前 diff",
       "should_trigger": false,
       "route": "native-review"
     },
     {
+      "id": "host-policy-trivial-local-fix",
+      "context": "Automatic collaboration is available, but the change is a one-line typo with one deterministic local check.",
+      "prompt": "修正文档里的一个拼写错误并检查链接。",
+      "should_trigger": false,
+      "activation": "host-policy-disqualified",
+      "route": "native-lead",
+      "expects_skip_reason": true
+    },
+    {
+      "id": "host-policy-unclear-write-boundary",
+      "context": "Automatic collaboration is available, but allowed writes and deterministic acceptance are not defined.",
+      "prompt": "把整个架构顺手优化一下，直接改。",
+      "should_trigger": false,
+      "activation": "host-policy-disqualified",
+      "route": "native-lead-or-clarify",
+      "expects_skip_reason": true
+    },
+    {
+      "id": "host-policy-sensitive-context",
+      "context": "The task requires unredacted customer data and production credentials to be sent to the collaborator.",
+      "prompt": "使用线上客户日志和密钥排查并直接修复。",
+      "should_trigger": false,
+      "activation": "host-policy-disqualified",
+      "route": "owner-gate",
+      "expects_skip_reason": true
+    },
+    {
+      "id": "exact-x-url",
       "prompt": "读取 https://x.com/example/status/123 这条推文",
       "should_trigger": false,
       "route": "superx"
     },
     {
+      "id": "x-search",
       "prompt": "搜索 X 上最近关于 xAI 的讨论",
       "should_trigger": false,
       "route": "superx"
     },
     {
+      "id": "generic-research-no-policy",
       "prompt": "调研一下 Python MCP SDK 的最新版本",
       "should_trigger": false,
       "route": "research"
     },
     {
+      "id": "other-named-collaborator",
       "prompt": "让 GLM 做一次架构 review",
       "should_trigger": false,
       "route": "named-other-collaborator"
     },
     {
+      "id": "unsupported-sidebar",
       "prompt": "在 Codex 侧边栏打开 Grok 终端",
       "should_trigger": false,
       "route": "unsupported-ui"

@@ -2,6 +2,12 @@
 
 All notable changes to Grok Companion are documented here.
 
+## 0.4.3 - 2026-08-03
+
+- Add an opt-in host-policy activation path so a pre-authorized capability-aware router can select Grok without requiring the user to name it again in every task.
+- Require visible route receipts and exact inherited write, acceptance, data, and spend boundaries for policy-selected delegation.
+- Add positive implicit-routing cases and negative trivial, ambiguous, and sensitive-context cases while keeping ordinary review, research, and exact X retrieval on their existing routes.
+
 ## 0.4.2 - 2026-07-24
 
 - Represent an incomplete `grok_wait` as pending with `job_ok: null` and `next_action: wait_same_job`, so agents do not mistake a bounded wait for a failed Grok job.

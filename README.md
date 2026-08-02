@@ -4,7 +4,7 @@
 
 让 **Codex** 把本机 **Grok CLI** 当作完整的外部协作者使用。
 
-Grok Companion v0.4.2 是一个带 14 个原生 MCP 工具的 Codex plugin。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
+Grok Companion v0.4.3 是一个带 14 个原生 MCP 工具的 Codex plugin。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
 
 > **这不是 Codex 侧边栏终端。**
 >
@@ -157,7 +157,9 @@ MCP 启动工具固定后台；CLI 默认前台，长任务需要显式添加 `-
 
 ## 路由边界
 
-Companion skill 只在用户明确要求 Grok 协作，或已在管理 Grok Companion job 时触发。未点名 Grok 的普通 code review 和通用 research 不归本插件；点名其他 AI 协作者或要求侧边栏 Grok 终端也不归本插件。
+Companion skill 有两个触发入口：用户明确要求 Grok 协作或正在管理已有 job；或者宿主的当前工作合同已经预授权自动选择协作者，并由任务负责人为这个有界任务选中 Grok。第二个入口是宿主主动启用的策略，不会因为任务“复杂、跨文件、值得 review”就自行获得授权。未满足任一入口的普通 code review 和通用 research 不归本插件；点名其他 AI 协作者或要求侧边栏 Grok 终端也不归本插件。
+
+宿主策略自动选中 Grok 时，调用前应留下 `🧭 route: <lead> -> Grok <role> | reason: <short reason>` 回执；文件修改还必须已有精确写入范围、确定性验收与 diff/test budget。
 
 | | superx | grok-companion |
 |---|---|---|
@@ -242,7 +244,7 @@ python3 plugins/grok-companion/scripts/grb.py setup --probe-superx --json
 - 这些内容同时会由 Grok CLI 发往 xAI，并受用户账号与 xAI 条款约束。
 - 不要提交或分享含密钥、客户数据或其他敏感内容的 job 目录。
 - `review` 是 prompt 级只读约束，不是 OS 沙箱。
-- `delegate` 使用完整本机 Grok CLI，并可能修改文件；只在用户明确授权后调用，之后仍需由 Codex 检查和验证。
+- `delegate` 使用完整本机 Grok CLI，并可能修改文件；只在用户直接授权，或宿主工作合同继承了用户已批准的精确写入边界后调用，之后仍需由 Codex 检查和验证。
 
 ## 架构
 
