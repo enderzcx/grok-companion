@@ -4,7 +4,7 @@
 
 Use the local **Grok CLI** as a full external collaborator inside **Codex**.
 
-Grok Companion v0.4.4 is a Codex plugin with 14 native MCP tools, plus an [Agent Plugins](https://agent-plugins.org/) 1.0.0 portable package surface. It covers consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
+Grok Companion v0.4.5 is a Codex plugin with 14 native MCP tools, plus an [Agent Plugins](https://agent-plugins.org/) 1.0.0 portable package surface. It covers consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
 
 > **This is not a Codex sidebar terminal.**
 >
@@ -104,7 +104,11 @@ It is a refreshable status snapshot, not a pretend live token stream. The curren
 
 ## Full And Quick Profiles
 
-Formal Grok collaboration defaults to `profile=full`: the plugin does not pass `--max-turns`, effort defaults to `xhigh`, the job runtime is 7200 seconds, and structured/git context defaults to `context_limit=512000` characters. `review`, `adversarial-review`, and `research` also enable Grok self-check under full. The goal is a complete Grok collaborator bridge (same product stance as `openai/codex-plugin-cc` for Codex), not a starved one-shot helper. When the embedded packet is truncated, the prompt tells Grok to tool-read the rest of the repo.
+Formal Grok collaboration defaults to `profile=full`: the plugin does not pass `--max-turns`, effort defaults to `high`, the job runtime is 7200 seconds, and structured/git context defaults to `context_limit=256000` characters. `review`, `adversarial-review`, and `research` also enable Grok self-check under full. The goal is a complete Grok collaborator bridge (same product stance as `openai/codex-plugin-cc` for Codex), not a starved one-shot helper.
+
+> Live check (Grok CLI 0.2.118 + default `grok-4.5`): `--effort` accepts only `high|medium|low`. `xhigh` / `max` fail with `unknown effort level ... use one of: high, medium, low`. `context_limit` is the companion embedded-packet budget, not the model context window; do not default to 1M characters.
+
+When the embedded packet is truncated, the prompt tells Grok to tool-read the rest of the repo.
 
 `profile=quick` is an explicit lightweight mode: ordinary tasks use `max_turns=16`, effort `high`, a 900-second job runtime, and no automatic self-check. Use it for connectivity smokes, fixed short answers, or an explicitly requested quick call. Structured `review` and `adversarial-review` are exceptions: even under quick, they remain uncapped unless the caller explicitly supplies `max_turns`.
 

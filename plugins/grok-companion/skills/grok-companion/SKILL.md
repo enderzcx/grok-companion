@@ -30,9 +30,9 @@ Treat this plugin like a full Grok collaborator bridge (same product idea as `op
 
 1. Prefer visible `grok_*` MCP tools.
 2. Pass the absolute current workspace as `cwd` on every call.
-3. Give Grok the complete task and all relevant constraints in one launch. Prefer `profile=full` (default): no plugin-imposed turn cap, effort `xhigh`, job runtime `7200` seconds, and a large embedded git/diff budget (`context_limit` default `512000`). Review, adversarial review, and research also self-check under full.
+3. Give Grok the complete task and all relevant constraints in one launch. Prefer `profile=full` (default): no plugin-imposed turn cap, effort `high`, job runtime `7200` seconds, and embedded git/diff budget `context_limit` default `256000` characters. Review, adversarial review, and research also self-check under full.
 4. Use `profile=quick` only for connectivity smoke, a deliberately small fixed-answer task, or an explicit user request. Ordinary quick tasks resolve to 16 turns, effort `high`, and 900 seconds. Structured `review` / `adversarial-review` stay uncapped unless the caller explicitly supplies `max_turns`.
-5. Do not add `max_turns` merely to fit the current host wait window. Raise `context_limit` or let Grok tool-read the repo when a multi-file diff may exceed the embedded packet.
+5. Do not add `max_turns` merely to fit the current host wait window. Do not pass `effort=xhigh` or `max` on the current default `grok-4.5` model: live CLI rejects them with `use one of: high, medium, low`. Prefer tool-read over megabyte-scale `context_limit` when the diff is huge.
 6. Launch tools return a background `job_id`.
 7. Call `grok_wait` with a bounded observation window (default 180s). If it returns `completed: false`, it also returns `job_ok: null` and `next_action: wait_same_job`; call it again with the same `job_id`. Avoid tight `grok_status` polling.
 8. When the user wants to see Grok working, call `grok_monitor` with the job and an absolute `.html` path in the current Codex visualization directory, then present that file as an inline visualization. Refreshing renders a new snapshot; it is not a live token stream.

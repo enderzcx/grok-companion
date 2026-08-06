@@ -225,10 +225,10 @@ class GrbTests(unittest.TestCase):
                 self.assertEqual(meta["profile"], "full")
                 self.assertIsNone(meta["max_turns"])
                 self.assertEqual(meta["timeout"], 7200)
-                self.assertEqual(meta["effort"], "xhigh")
+                self.assertEqual(meta["effort"], "high")
                 self.assertEqual(meta["check"], expected_check)
                 self.assertNotIn("--max-turns", raw["argv"])
-                self.assertEqual(raw["argv"][raw["argv"].index("--effort") + 1], "xhigh")
+                self.assertEqual(raw["argv"][raw["argv"].index("--effort") + 1], "high")
                 expected_strategy = "prompt" if mode in {"review", "adversarial-review"} else "native" if expected_check else "off"
                 self.assertEqual(meta["check_strategy"], expected_strategy)
                 self.assertEqual("--check" in raw["argv"], mode == "research")
@@ -535,7 +535,7 @@ class GrbTests(unittest.TestCase):
             meta = json.loads((latest / "meta.json").read_text(encoding="utf-8"))
             self.assertIn("--resume", raw["argv"])
             self.assertIn("11111111-1111-4111-8111-111111111111", raw["argv"])
-            self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["effort"], meta["check"]), ("full", None, 7200, "xhigh", False))
+            self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["effort"], meta["check"]), ("full", None, 7200, "high", False))
             self.assertNotIn("--max-turns", raw["argv"])
 
             sessions = self.run_grb(tmp, "sessions", "--json")

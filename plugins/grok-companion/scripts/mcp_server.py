@@ -16,7 +16,7 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.4.4"
+SERVER_VERSION = "0.4.5"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
@@ -55,13 +55,13 @@ RUNTIME_PROPERTIES: dict[str, Any] = {
     "effort": {
         "type": "string",
         "enum": ["low", "medium", "high", "xhigh", "max"],
-        "description": "Grok effort. Omission defaults to xhigh under full, high under quick.",
+        "description": "Grok effort. Omission defaults to high. Live default model grok-4.5 currently accepts only low|medium|high; xhigh/max are rejected unless a model advertises them.",
     },
     "reasoning_effort": {"type": "string"},
     "profile": {
         "type": "string",
         "enum": ["full", "quick"],
-        "description": "Runtime profile. Omission defaults to full: no plugin-imposed turn cap, effort xhigh, 7200s job timeout, and a large structured-context budget. quick is only for smoke/short tasks. Structured review/adversarial-review stay uncapped unless max_turns is explicit.",
+        "description": "Runtime profile. Omission defaults to full: no plugin-imposed turn cap, effort high, 7200s job timeout, and a 256000-char structured-context budget. quick is only for smoke/short tasks. Structured review/adversarial-review stay uncapped unless max_turns is explicit.",
     },
     "max_turns": {
         "type": "integer",
@@ -78,8 +78,8 @@ RUNTIME_PROPERTIES: dict[str, Any] = {
     "context_limit": {
         "type": "integer",
         "minimum": 1000,
-        "maximum": 5_000_000,
-        "description": "Max characters of embedded git/diff context for review and include_git_context launches. Default 512000. When truncated, Grok is told to tool-read the remainder.",
+        "maximum": 2_000_000,
+        "description": "Max characters of embedded git/diff context for review and include_git_context launches. Default 256000 (not the model context window). When truncated, Grok is told to tool-read the remainder. Avoid megabyte-scale packets.",
     },
     "tools": {"type": "string", "description": "Comma-separated Grok tool allowlist."},
     "disallowed_tools": {"type": "string", "description": "Comma-separated Grok tool denylist."},
@@ -507,9 +507,10 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                         "then repeat bounded grok_wait calls with the same job_id until terminal. An incomplete wait "
                         "uses job_ok=null and next_action=wait_same_job; it does not justify cancellation or restart. "
                         "Only terminal job_ok=false is a job failure. Full is the default complete-collaborator profile "
-                        "(no turn cap, effort xhigh, 7200s runtime, large structured context); quick is opt-in smoke only. "
-                        "Do not add max_turns merely to fit one host wait. Use grok_monitor for a refreshable inline job "
-                        "snapshot, and grok_sessions plus grok_continue for continuity. Use superx for exact X/Twitter retrieval."
+                        "(no turn cap, effort high, 7200s runtime, 256k-char structured context); quick is opt-in smoke only. "
+                        "Do not add max_turns merely to fit one host wait. Do not pass xhigh/max effort on models that "
+                        "only advertise low|medium|high. Use grok_monitor for a refreshable inline job snapshot, and "
+                        "grok_sessions plus grok_continue for continuity. Use superx for exact X/Twitter retrieval."
                     ),
                 },
             }

@@ -83,9 +83,10 @@ class SkillContractTests(unittest.TestCase):
         combined = skill + "\n" + handling
         self.assertIn("profile=full", combined)
         self.assertIn("no plugin-imposed turn cap", combined)
-        self.assertIn("effort `xhigh`", combined)
-        self.assertIn("512000", combined)
+        self.assertIn("effort `high`", combined)
+        self.assertIn("256000", combined)
         self.assertIn("stay uncapped unless the caller explicitly supplies `max_turns`", combined)
+        self.assertIn("use one of: high, medium, low", combined)
         self.assertIn("same `job_id`", combined)
         self.assertIn("`job_ok: null`", combined)
         self.assertIn("wait_same_job", combined)

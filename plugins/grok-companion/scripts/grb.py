@@ -23,12 +23,16 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.4.4"
+VERSION = "0.4.5"
 DEFAULT_PROFILE = "full"
 # full = complete Grok collaborator budget (no artificial turn starve, high reasoning, long runtime).
 # quick = connectivity / deliberately short tasks only.
+#
+# Effort defaults are pinned to levels accepted by the current default model (grok-4.5):
+# live CLI 0.2.118 accepts only high|medium|low for that model. Canonical CLI docs also list
+# xhigh/max, but those fail at launch when the active model menu does not advertise them.
 PROFILE_DEFAULTS = {
-    "full": {"max_turns": None, "timeout": 7200, "effort": "xhigh"},
+    "full": {"max_turns": None, "timeout": 7200, "effort": "high"},
     "quick": {"max_turns": 16, "timeout": 900, "effort": "high"},
 }
 AUTO_CHECK_MODES = {"review", "adversarial-review", "research"}
@@ -37,9 +41,11 @@ AUTO_CHECK_MODES = {"review", "adversarial-review", "research"}
 UNBOUNDED_REVIEW_MODES = {"review", "adversarial-review"}
 DEFAULT_TIMEOUT = PROFILE_DEFAULTS[DEFAULT_PROFILE]["timeout"]
 DEFAULT_MAX_TURNS = PROFILE_DEFAULTS[DEFAULT_PROFILE]["max_turns"]
-# Structured review quality is gated by how much repo evidence we pass in. 80k was too small
-# for multi-file diffs; prefer a large inline budget and, when truncated, tell Grok to tool-read.
-DEFAULT_CONTEXT_LIMIT = 512_000
+# Embedded git/diff packet size in characters. 80k was too small for multi-file reviews;
+# 256k matches the order of codex-plugin-cc's inline-diff budget. This is NOT Grok's full
+# model context window — oversized packets still waste tokens and can crowd tools/system
+# prompt. When truncated, the prompt tells Grok to tool-read the remainder.
+DEFAULT_CONTEXT_LIMIT = 256_000
 DEFAULT_WAIT_TIMEOUT = 180.0
 JOB_ROOT_NAME = ".grok-companion"
 TERMINAL_STATUSES = {"complete", "failed", "timeout", "cancelled", "unknown"}

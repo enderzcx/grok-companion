@@ -1,6 +1,6 @@
 {
   "name": "grok-companion",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Use the local Grok CLI as a complete external collaborator for Codex through explicit requests or opt-in host routing: consult, review, research, delegate, and manage jobs.",
   "author": {
     "name": "Ender",
