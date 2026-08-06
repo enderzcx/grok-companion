@@ -1,8 +1,12 @@
 ---
 name: grok-companion
 description: "Use when the user explicitly asks Codex to collaborate with Grok, or when an active host policy has pre-authorized automatic collaborator selection and selects Grok for a bounded task. Supports second opinions, review, adversarial review, research, bounded delegation, session continuation, and job management. Not for generic code review or web research without either activation path, exact X/Twitter retrieval or search (use superx), another named AI collaborator, or requests for a sidebar terminal."
+license: MIT
+compatibility: Requires local Grok CLI (`grok` or GROK_BIN), Python 3.9+, and a client that loads Agent Skills plus stdio MCP (Codex plugin install is the primary path).
 metadata:
   short-description: Use Grok as a managed Codex collaborator
+  sunny_skill_type: wrapper
+  agent_plugins: "1.0.0"
 ---
 
 # Grok Companion
@@ -22,17 +26,20 @@ For exact X/Twitter URLs, posts, accounts, threads, articles, search, or X-nativ
 
 ## Call Path
 
+Treat this plugin like a full Grok collaborator bridge (same product idea as `openai/codex-plugin-cc`, but for Grok): the host forwards a complete task; Grok keeps its full tool surface and reasoning budget. Do not starve Grok to fit one host turn.
+
 1. Prefer visible `grok_*` MCP tools.
 2. Pass the absolute current workspace as `cwd` on every call.
-3. Use `profile=full` by default. It resolves to 30 turns and a 3600-second job runtime; review, adversarial review, and research also self-check. Do not lower these budgets merely to fit the current Codex turn.
-4. Use `profile=quick` only for a connectivity smoke, a deliberately small fixed-answer task, or an explicit user request. It resolves to 6 turns, 300 seconds, and no automatic self-check.
-5. Launch tools return a background `job_id`.
-6. Call `grok_wait` with a bounded timeout. If it returns `completed: false`, it will also return `job_ok: null` and `next_action: wait_same_job`; call it again with the same `job_id`. Avoid tight `grok_status` polling.
-7. When the user wants to see Grok working, call `grok_monitor` with the job and an absolute `.html` path in the current Codex visualization directory, then present that file as an inline visualization. Refreshing renders a new snapshot; it is not a live token stream.
-8. Follow [references/result-handling.md](references/result-handling.md) when presenting or accepting results.
-9. Use the bundled `scripts/grb.py` CLI only when MCP is unavailable or foreground execution is specifically required.
+3. Give Grok the complete task and all relevant constraints in one launch. Prefer `profile=full` (default): no plugin-imposed turn cap, effort `xhigh`, job runtime `7200` seconds, and a large embedded git/diff budget (`context_limit` default `512000`). Review, adversarial review, and research also self-check under full.
+4. Use `profile=quick` only for connectivity smoke, a deliberately small fixed-answer task, or an explicit user request. Ordinary quick tasks resolve to 16 turns, effort `high`, and 900 seconds. Structured `review` / `adversarial-review` stay uncapped unless the caller explicitly supplies `max_turns`.
+5. Do not add `max_turns` merely to fit the current host wait window. Raise `context_limit` or let Grok tool-read the repo when a multi-file diff may exceed the embedded packet.
+6. Launch tools return a background `job_id`.
+7. Call `grok_wait` with a bounded observation window (default 180s). If it returns `completed: false`, it also returns `job_ok: null` and `next_action: wait_same_job`; call it again with the same `job_id`. Avoid tight `grok_status` polling.
+8. When the user wants to see Grok working, call `grok_monitor` with the job and an absolute `.html` path in the current Codex visualization directory, then present that file as an inline visualization. Refreshing renders a new snapshot; it is not a live token stream.
+9. Follow [references/result-handling.md](references/result-handling.md) when presenting or accepting results.
+10. Use the bundled `scripts/grb.py` CLI only when MCP is unavailable or foreground execution is specifically required.
 
-Explicit `max_turns`, job `timeout`, and `check` values override the selected profile. The launch `timeout` is Grok's total job runtime; the `grok_wait` timeout is only one bounded observation window and never cancels the job.
+Explicit `max_turns`, job `timeout`, `context_limit`, and `check` values override the selected profile. The launch `timeout` is Grok's total job runtime; the `grok_wait` timeout is only one observation window and never cancels the job.
 
 Do not invent tools that are not visible in the current session.
 

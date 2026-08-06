@@ -1,11 +1,14 @@
 # Architecture
 
-Grok Companion has four layers:
+Grok Companion has five layers:
 
-1. **Codex plugin surface**: `.codex-plugin/plugin.json`, `.mcp.json`, and `skills/grok-companion/SKILL.md`.
-2. **MCP adapter**: `scripts/mcp_server.py` exposes native `grok_*` tools over stdio JSON-RPC.
-3. **Companion runtime**: `scripts/grb.py` owns prompts, job creation, background processes, status, results, and cancellation.
-4. **Capability adapters**: the local Grok CLI, git diff/context collection, and optional `superx` diagnostics.
+1. **Portable Agent Plugins surface**: root `plugin.json`, `mcp.json`, and `skills/grok-companion/SKILL.md` (Agent Skills layout).
+2. **Codex adapter surface**: `.codex-plugin/plugin.json`, `.mcp.json`, and the marketplace index under `.agents/plugins/`.
+3. **MCP adapter**: `scripts/mcp_server.py` exposes native `grok_*` tools over stdio JSON-RPC.
+4. **Companion runtime**: `scripts/grb.py` owns prompts, job creation, background processes, status, results, and cancellation.
+5. **Capability adapters**: the local Grok CLI, git diff/context collection, and optional `superx` diagnostics.
+
+The portable and Codex surfaces must stay version-aligned. See [AGENT_PLUGINS.md](./AGENT_PLUGINS.md).
 
 The MCP server intentionally delegates every operation to `grb.py`. There is one job model and one artifact format whether Codex calls a native tool or a human runs the CLI.
 
@@ -22,11 +25,11 @@ Codex task
 
 MCP launch tools always use background execution. The initial call returns quickly with a `job_id`, which avoids treating a long Grok inference as an MCP timeout and keeps status/cancel calls available. Foreground waiting remains available through the CLI fallback.
 
-Runtime profiles are resolved once in `grb.py`, then persisted as concrete `profile`, `max_turns`, `timeout`, and `check` job metadata. MCP forwards only user-supplied fields. The default `full` profile uses 30 turns and a 3600-second job runtime; `quick` uses 6 turns and 300 seconds. Explicit fields override profile values.
+Runtime profiles are resolved once in `grb.py`, then persisted as concrete `profile`, `max_turns`, `effort`, `timeout`, and `check` job metadata. MCP forwards only user-supplied fields. The default `full` profile leaves `max_turns` unset so the plugin does not impose a turn cap, defaults effort to `xhigh`, uses a 7200-second job runtime, and embeds up to 512000 characters of git/diff context for structured review. `quick` uses 16 turns, effort `high`, and 900 seconds for ordinary short tasks. Structured `review` and `adversarial-review` never inherit quick's turn cap: only an explicit `max_turns` limits them. When embedded context is truncated, the prompt tells Grok to tool-read the remainder instead of pretending the packet is complete. Explicit fields override profile values.
 
 Self-check intent is persisted separately from transport as `check_strategy`. Research can use Grok's native `--check`. Structured review modes use an equivalent prompt self-check because the current Grok CLI rejects `--check` together with `--json-schema`; this preserves valid structured output instead of failing at launch.
 
-Job runtime and waiting are intentionally separate. `grok_wait` observes one bounded window of at most 300 seconds. An incomplete window never cancels or restarts the background job; clients continue waiting with the same `job_id` until a terminal state or preserve the running job during handoff.
+Job runtime and waiting are intentionally separate. `grok_wait` observes one bounded window (default 180 seconds, MCP max 600). An incomplete window never cancels or restarts the background job; clients continue waiting with the same `job_id` until a terminal state or preserve the running job during handoff.
 
 `grok_wait` performs one bounded long-poll over the same disk state and returns the terminal result when available. This keeps agents from issuing tight `grok_status` loops. A timed-out wait does not cancel or restart the job.
 

@@ -4,13 +4,13 @@
 
 让 **Codex** 把本机 **Grok CLI** 当作完整的外部协作者使用。
 
-Grok Companion v0.4.3 是一个带 14 个原生 MCP 工具的 Codex plugin。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
+Grok Companion v0.4.4 是一个带 14 个原生 MCP 工具的 Codex plugin，同时提供 [Agent Plugins](https://agent-plugins.org/) 1.0.0 可移植包装。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
 
 > **这不是 Codex 侧边栏终端。**
 >
 > 它不会把 Grok 嵌成一个常驻 shell 或侧边栏聊天窗口。v0.4 增加了线程内 Rich Visualization Job Monitor，以及可由用户在终端运行的 `watch`；背后仍是同一个本机 `grok` job 与产物模型。
 
-产品方向参考 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)，但本项目是 Codex plugin，不是 Claude Code slash-command 插件。
+产品方向参考 [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)。当前主安装路径仍是 Codex plugin；可移植核心遵循 Agent Plugins + Agent Skills，不是 Claude Code slash-command 插件。
 
 ## 能做什么
 
@@ -35,25 +35,40 @@ Grok Companion v0.4.3 是一个带 14 个原生 MCP 工具的 Codex plugin。Cod
 
 ## 为什么用 MCP
 
-v0.1 需要 Codex 通过 shell 调用 `grb.py`。v0.2 起，插件注册了本地 stdio MCP server，让 Codex 直接获得一组原生 `grok_*` 工具：
+v0.1 需要 Codex 通过 shell 调用 `grb.py`。v0.2 起，插件注册了本地 stdio MCP server，让 Codex 直接获得一组原生 `grok_*` 工具。
+
+可移植 Agent Plugins 表面（`plugins/grok-companion/mcp.json`）：
 
 ```json
 {
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
   "mcpServers": {
     "grok-companion": {
+      "type": "stdio",
       "command": "python3",
       "args": ["./scripts/mcp_server.py"],
-      "cwd": "."
+      "cwd": "${PLUGIN_ROOT}"
     }
   }
 }
 ```
 
+Codex 适配层仍使用 `.mcp.json`，在相同 `command` / `args` 上增加 `env_vars` 白名单，透传代理、证书、`GROK_BIN` 和 jobs-dir，避免本机 Grok 能联网、MCP 子进程却丢失代理配置。
+
 `mcp_server.py` 只负责协议、参数校验和结构化结果，所有实际任务仍交给 `grb.py`。MCP 与 CLI 因此共用同一套 prompt、git context、后台进程和 job 产物，不会形成两套逐渐漂移的实现。
 
 MCP server 仅使用 Python 标准库，不需要额外安装 pip 包。
 
-插件会通过 Codex `env_vars` 白名单透传常见代理、证书、`GROK_BIN` 和 jobs-dir 环境变量，避免本机 Grok 能联网、MCP 子进程却丢失代理配置。
+## 双格式包装
+
+| 表面 | 文件 | 用途 |
+|---|---|---|
+| Agent Plugins 可移植核心 | `plugin.json`、`mcp.json`、`skills/` | 跨兼容客户端的开放标准形状 |
+| Codex 适配 | `.codex-plugin/plugin.json`、`.mcp.json`、`.agents/plugins/marketplace.json` | 当前 Codex 安装与 marketplace |
+| 发布约定 | [docs/PUBLIC_SKILL_PLUGIN_PUBLISHING.md](./docs/PUBLIC_SKILL_PLUGIN_PUBLISHING.md) | Ender 公开 skill/plugin 规则 |
+| 本仓库细节 | [docs/AGENT_PLUGINS.md](./docs/AGENT_PLUGINS.md) | 双表面一致性与迁移说明 |
+
+本地 `~/.agents/skills` 个人 OS **不**批量迁移到 Agent Plugins；只有像本仓库这样的公开分发单元才做双格式。
 
 ## 默认后台任务
 
@@ -73,7 +88,7 @@ Codex 调用 grok_review / grok_research / grok_continue / ...
 
 1. `grok_setup` 检查环境。
 2. 调用 `grok_review`、`grok_consult` 或其他启动工具，获得 `job_id`。
-3. 调用 `grok_wait`，默认每次最多等待 90 秒。
+3. 调用 `grok_wait`，默认每次最多等待 180 秒（观察窗口，不是 job 总预算）。
 4. 若返回 `completed: false`，此时 `job_ok` 为 `null`、`next_action` 为 `wait_same_job`；继续用同一 `job_id` 调用 `grok_wait`，不要取消或重启任务。
 5. 只有用户明确要求或存在真实运行原因时才调用 `grok_cancel`。
 
@@ -89,13 +104,13 @@ Codex 调用 grok_review / grok_research / grok_continue / ...
 
 ## Full 与 Quick
 
-正式 Grok 协作默认使用 `profile=full`：`max_turns=30`、job runtime `timeout=3600` 秒。`review`、`adversarial-review` 和 `research` 在 full 下默认开启 Grok 自检。这个默认值用于让 Grok 完整探索、检查并返回结论，不应为了迁就 Codex 的单次等待窗口而主动缩短。
+正式 Grok 协作默认使用 `profile=full`：插件不主动传 `--max-turns`，`effort=xhigh`，job runtime `timeout=7200` 秒，结构化/git context 默认 `context_limit=512000` 字符。`review`、`adversarial-review` 和 `research` 在 full 下默认开启 Grok 自检。设计目标是让 Grok 作为**完整协作者**工作（类似 `openai/codex-plugin-cc` 对 Codex 的态度），而不是被宿主 turn 预算饿死。若 embedded diff 被截断，prompt 会明确要求 Grok 用工具继续读仓。
 
-`profile=quick` 是显式轻量模式：`max_turns=6`、job runtime `timeout=300` 秒、不自动开启自检。它适合连通性 smoke、固定短答案或用户明确要求的快速调用。
+`profile=quick` 是显式轻量模式：普通任务使用 `max_turns=16`、`effort=high`、job runtime `timeout=900` 秒，并且不自动开启自检。它适合连通性 smoke、固定短答案或用户明确要求的快速调用。结构化 `review` 和 `adversarial-review` 是例外：即使选择 quick，也不会继承 quick 的 turn cap，只有显式传入 `max_turns` 才会限制轮次。
 
-显式 `max_turns`、`timeout`、`check` 会覆盖 profile。CLI 同时支持 `--check` 和 `--no-check`；MCP 的 `check: true|false` 也是显式覆盖。Grok CLI 当前不允许 `--check` 与 `--json-schema` 同时使用，因此结构化 review 在 prompt 内执行 schema-safe 自检，research 使用原生 `--check`。job metadata 的 `check_strategy` 会记录 `prompt`、`native` 或 `off`。
+显式 `max_turns`、`timeout`、`context_limit`、`check` 会覆盖 profile；结构化审查的 turn cap 只接受显式 `max_turns`。CLI 同时支持 `--check` 和 `--no-check`；MCP 的 `check: true|false` 也是显式覆盖。Grok CLI 当前不允许 `--check` 与 `--json-schema` 同时使用，因此结构化 review 在 prompt 内执行 schema-safe 自检，research 使用原生 `--check`。job metadata 的 `check_strategy` 会记录 `prompt`、`native` 或 `off`。
 
-这里启动工具的 `timeout` 是整个 Grok job 的运行预算，`grok_wait` 的 `timeout` 只是单次等待窗口，最长 300 秒，不会停止后台 job。
+这里启动工具的 `timeout` 是整个 Grok job 的运行预算，`grok_wait` 的 `timeout` 只是单次观察窗口（默认 180 秒，MCP 最长 600 秒），不会停止后台 job。
 
 ## 结构化 Review
 
@@ -248,12 +263,13 @@ python3 plugins/grok-companion/scripts/grb.py setup --probe-superx --json
 
 ## 架构
 
-1. **Plugin 表面**：`.codex-plugin/plugin.json`、`.mcp.json`、skill
-2. **MCP 适配层**：`scripts/mcp_server.py`
-3. **任务运行时**：`scripts/grb.py`、后台进程与 job artifacts
-4. **能力适配**：本机 Grok CLI、git context、可选 `superx` 诊断
+1. **Agent Plugins 可移植表面**：`plugin.json`、`mcp.json`、`skills/`
+2. **Codex 适配表面**：`.codex-plugin/plugin.json`、`.mcp.json`、marketplace
+3. **MCP 适配层**：`scripts/mcp_server.py`
+4. **任务运行时**：`scripts/grb.py`、后台进程与 job artifacts
+5. **能力适配**：本机 Grok CLI、git context、可选 `superx` 诊断
 
-详见 [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)。
+详见 [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) 与 [docs/AGENT_PLUGINS.md](./docs/AGENT_PLUGINS.md)。
 
 ## 测试与 CI
 

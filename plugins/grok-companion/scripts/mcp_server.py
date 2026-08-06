@@ -16,7 +16,7 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.4.3"
+SERVER_VERSION = "0.4.4"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
@@ -52,19 +52,42 @@ RUNTIME_PROPERTIES: dict[str, Any] = {
     "cwd": CWD,
     "jobs_dir": JOBS_DIR,
     "model": {"type": "string", "description": "Optional Grok model id."},
-    "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
+    "effort": {
+        "type": "string",
+        "enum": ["low", "medium", "high", "xhigh", "max"],
+        "description": "Grok effort. Omission defaults to xhigh under full, high under quick.",
+    },
     "reasoning_effort": {"type": "string"},
     "profile": {
         "type": "string",
         "enum": ["full", "quick"],
-        "description": "Runtime profile. Omission defaults to full: 30 turns and a 3600-second job timeout.",
+        "description": "Runtime profile. Omission defaults to full: no plugin-imposed turn cap, effort xhigh, 7200s job timeout, and a large structured-context budget. quick is only for smoke/short tasks. Structured review/adversarial-review stay uncapped unless max_turns is explicit.",
     },
-    "max_turns": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Explicit profile override."},
-    "timeout": {"type": "integer", "minimum": 1, "maximum": 86400, "description": "Job runtime in seconds, not the grok_wait budget."},
+    "max_turns": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 500,
+        "description": "Explicit turn cap. Prefer omission on full so Grok keeps complete collaborator capacity. Structured review/adversarial-review are capped only when this field is supplied.",
+    },
+    "timeout": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 86400,
+        "description": "Job runtime in seconds, not the grok_wait observation window. full defaults to 7200.",
+    },
+    "context_limit": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 5_000_000,
+        "description": "Max characters of embedded git/diff context for review and include_git_context launches. Default 512000. When truncated, Grok is told to tool-read the remainder.",
+    },
     "tools": {"type": "string", "description": "Comma-separated Grok tool allowlist."},
     "disallowed_tools": {"type": "string", "description": "Comma-separated Grok tool denylist."},
     "disable_web_search": {"type": "boolean", "default": False},
-    "check": {"type": "boolean", "description": "Explicit self-check override. When omitted, full enables it for review, adversarial review, and research. Structured reviews use a prompt self-check because Grok CLI rejects --check with --json-schema."},
+    "check": {
+        "type": "boolean",
+        "description": "Explicit self-check override. When omitted, full enables it for review, adversarial review, and research. Structured reviews use a prompt self-check because Grok CLI rejects --check with --json-schema.",
+    },
     "best_of_n": {"type": "integer", "minimum": 1, "maximum": 32},
     "session_id": {"type": "string", "description": "Existing Grok session id to resume with grok --resume."},
 }
@@ -202,7 +225,13 @@ TOOLS: list[dict[str, Any]] = [
                 "cwd": CWD,
                 "job_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
                 "jobs_dir": JOBS_DIR,
-                "timeout": {"type": "integer", "minimum": 0, "maximum": 300, "default": 90},
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 600,
+                    "default": 180,
+                    "description": "One observation window in seconds. Incomplete waits return next_action=wait_same_job; this never cancels the Grok job.",
+                },
                 "poll_interval_ms": {"type": "integer", "minimum": 50, "maximum": 5000, "default": 250},
             },
             ["cwd"],
@@ -305,6 +334,7 @@ def launch_tool(name: str, args: dict[str, Any]) -> tuple[int, Any, str, str]:
         "profile",
         "max_turns",
         "timeout",
+        "context_limit",
         "tools",
         "disallowed_tools",
         "disable_web_search",
@@ -476,9 +506,10 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                         "Grok launch tools always use background jobs. Pass the current workspace as cwd, "
                         "then repeat bounded grok_wait calls with the same job_id until terminal. An incomplete wait "
                         "uses job_ok=null and next_action=wait_same_job; it does not justify cancellation or restart. "
-                        "Only terminal job_ok=false is a job failure. Full is the default runtime profile; quick is opt-in. "
-                        "Use grok_monitor for a refreshable inline job snapshot, and grok_sessions plus grok_continue "
-                        "for continuity. Use superx for exact X/Twitter retrieval."
+                        "Only terminal job_ok=false is a job failure. Full is the default complete-collaborator profile "
+                        "(no turn cap, effort xhigh, 7200s runtime, large structured context); quick is opt-in smoke only. "
+                        "Do not add max_turns merely to fit one host wait. Use grok_monitor for a refreshable inline job "
+                        "snapshot, and grok_sessions plus grok_continue for continuity. Use superx for exact X/Twitter retrieval."
                     ),
                 },
             }

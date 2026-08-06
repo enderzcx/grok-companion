@@ -31,6 +31,9 @@ def allowed_sop_files() -> dict[str, Path]:
 
 def validate() -> int:
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    portable = json.loads((PLUGIN / "plugin.json").read_text(encoding="utf-8"))
+    mcp = json.loads((PLUGIN / "mcp.json").read_text(encoding="utf-8"))
+    codex_mcp = json.loads((PLUGIN / ".mcp.json").read_text(encoding="utf-8"))
     grb = (PLUGIN / "scripts" / "grb.py").read_text(encoding="utf-8")
     server = (PLUGIN / "scripts" / "mcp_server.py").read_text(encoding="utf-8")
     skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
@@ -39,6 +42,24 @@ def validate() -> int:
     template = json.loads((SKILL / "templates" / "review-result.json").read_text(encoding="utf-8"))
 
     version = manifest["version"]
+    if portable.get("version") != version:
+        fail("Agent Plugins plugin.json version does not match Codex manifest")
+    if portable.get("name") != manifest.get("name"):
+        fail("Agent Plugins plugin.json name does not match Codex manifest")
+    if portable.get("$schema") != "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json":
+        fail("Agent Plugins plugin.json $schema is wrong")
+    if mcp.get("$schema") != "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json":
+        fail("Agent Plugins mcp.json $schema is wrong")
+    portable_server = mcp.get("mcpServers", {}).get("grok-companion", {})
+    codex_server = codex_mcp.get("mcpServers", {}).get("grok-companion", {})
+    if portable_server.get("type") != "stdio":
+        fail("portable MCP server type must be stdio")
+    if portable_server.get("command") != codex_server.get("command"):
+        fail("portable and Codex MCP commands drifted")
+    if portable_server.get("args") != codex_server.get("args"):
+        fail("portable and Codex MCP args drifted")
+    if "agent_plugins:" not in skill or "1.0.0" not in skill:
+        fail("skill metadata.agent_plugins must declare 1.0.0")
     for label, text, pattern in (
         ("grb", grb, r'^VERSION = "([^"]+)"$'),
         ("mcp server", server, r'^SERVER_VERSION = "([^"]+)"$'),

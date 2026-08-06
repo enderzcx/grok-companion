@@ -23,16 +23,24 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 DEFAULT_PROFILE = "full"
+# full = complete Grok collaborator budget (no artificial turn starve, high reasoning, long runtime).
+# quick = connectivity / deliberately short tasks only.
 PROFILE_DEFAULTS = {
-    "full": {"max_turns": 30, "timeout": 3600},
-    "quick": {"max_turns": 6, "timeout": 300},
+    "full": {"max_turns": None, "timeout": 7200, "effort": "xhigh"},
+    "quick": {"max_turns": 16, "timeout": 900, "effort": "high"},
 }
 AUTO_CHECK_MODES = {"review", "adversarial-review", "research"}
+# All full-profile modes leave max_turns unset unless the caller overrides; structured
+# reviews also stay uncapped under quick unless max_turns is explicit.
+UNBOUNDED_REVIEW_MODES = {"review", "adversarial-review"}
 DEFAULT_TIMEOUT = PROFILE_DEFAULTS[DEFAULT_PROFILE]["timeout"]
 DEFAULT_MAX_TURNS = PROFILE_DEFAULTS[DEFAULT_PROFILE]["max_turns"]
-DEFAULT_CONTEXT_LIMIT = 80000
+# Structured review quality is gated by how much repo evidence we pass in. 80k was too small
+# for multi-file diffs; prefer a large inline budget and, when truncated, tell Grok to tool-read.
+DEFAULT_CONTEXT_LIMIT = 512_000
+DEFAULT_WAIT_TIMEOUT = 180.0
 JOB_ROOT_NAME = ".grok-companion"
 TERMINAL_STATUSES = {"complete", "failed", "timeout", "cancelled", "unknown"}
 REVIEW_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "review-output.schema.json"
@@ -63,6 +71,22 @@ def default_jobs_dir() -> Path:
     if env:
         return Path(env).expanduser().resolve()
     return repo_or_cwd() / JOB_ROOT_NAME / "jobs"
+
+
+def default_grok_bin() -> str:
+    configured = os.environ.get("GROK_BIN")
+    if configured:
+        return str(Path(configured).expanduser()) if os.path.isabs(os.path.expanduser(configured)) else configured
+
+    discovered = which("grok")
+    if discovered:
+        return discovered
+
+    for candidate in (Path.home() / ".local" / "bin" / "grok", Path.home() / ".grok" / "bin" / "grok"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    return "grok"
 
 
 def ensure_dir(path: Path) -> None:
@@ -283,16 +307,18 @@ def markdown_block(title: str, body: str) -> str:
 def build_prompt(mode: str, task: str, args: argparse.Namespace, git_context: dict[str, Any] | None) -> str:
     shared = textwrap.dedent(
         f"""
-        You are Grok acting as a complete external AI collaborator for Codex.
+        You are Grok acting as a complete external AI collaborator for a host agent (Codex or compatible).
+        The host is a forwarder/coordinator. You own the Grok-side investigation, reasoning, and result quality.
+        Use the full local Grok tool surface available in this session; do not wait for the host to re-paste missing files.
 
         Work mode: {mode}
         Current date: {dt.date.today().isoformat()}
 
         Rules:
-        - Be concrete, critical, and useful.
+        - Be concrete, critical, and useful. Prefer thorough evidence over brevity when the task is non-trivial.
         - Do not claim you changed files unless you actually did through tools.
-        - If evidence is missing, say exactly what is missing.
-        - Prefer concise Markdown with findings first when reviewing code.
+        - If evidence is missing, retrieve it with tools when possible; otherwise say exactly what is missing.
+        - For code review modes, present findings first and keep residual risk explicit.
         - Preserve Chinese if the user task is Chinese; otherwise answer in the task language.
         """
     ).strip()
@@ -308,6 +334,28 @@ def build_prompt(mode: str, task: str, args: argparse.Namespace, git_context: di
         sections.append(markdown_block("Repository Context", f"```json\n{git_json}\n```"))
         if git_context.get("diff"):
             sections.append(markdown_block("Diff", f"```diff\n{git_context['diff']}\n```"))
+        if git_context.get("truncated"):
+            sections.append(
+                markdown_block(
+                    "Context Completeness",
+                    textwrap.dedent(
+                        """
+                        The embedded git context was truncated to the companion context budget.
+                        Treat it as a partial packet, not the whole truth.
+                        Use read-only tools (git status/diff/show/log, file reads, tests when allowed by the mode)
+                        to inspect the rest of the target before finalizing conclusions.
+                        Do not invent paths or hunks that you did not observe.
+                        """
+                    ).strip(),
+                )
+            )
+        else:
+            sections.append(
+                markdown_block(
+                    "Context Completeness",
+                    "Use the embedded repository context as primary evidence. Still open nearby files with tools when a finding needs surrounding code.",
+                )
+            )
 
     if mode == "review":
         sections.append(
@@ -315,11 +363,12 @@ def build_prompt(mode: str, task: str, args: argparse.Namespace, git_context: di
                 "Review Contract",
                 textwrap.dedent(
                     """
-                    Run a read-only code review. Do not propose broad rewrites unless needed for a concrete risk.
+                    Run a thorough read-only code review. Do not propose broad rewrites unless needed for a concrete risk.
 
                     Return only the JSON object required by the supplied review schema.
                     Order findings by severity. Include precise file and line evidence when available.
                     Use an empty findings array and verdict "approve" when no actionable issue exists.
+                    Do not under-report material issues to stay short; structured output is a format constraint, not a severity budget.
 
                     Prioritize bugs, regressions, data loss, auth/security, concurrency, deploy/runtime breakage, and missing tests.
                     """
@@ -335,7 +384,7 @@ def build_prompt(mode: str, task: str, args: argparse.Namespace, git_context: di
                     Challenge the implementation direction and assumptions, not only local bugs.
                     Look for hidden coupling, bad abstractions, risky defaults, migration hazards,
                     operational blind spots, rollback failure, and simpler alternatives.
-                    Keep it read-only and specific.
+                    Keep it read-only, specific, and complete enough that the host can decide without redoing the investigation.
                     """
                 ),
             )
@@ -344,25 +393,30 @@ def build_prompt(mode: str, task: str, args: argparse.Namespace, git_context: di
         sections.append(
             markdown_block(
                 "Consult Contract",
-                "Give a second opinion that Codex can use immediately. State your recommendation, tradeoffs, and what you would verify next.",
+                "Give a second opinion the host can use immediately. State your recommendation, tradeoffs, rejected alternatives, and what you would verify next.",
             )
         )
     elif mode == "research":
         sections.append(
             markdown_block(
                 "Research Contract",
-                "Produce a source-aware research brief. Separate confirmed facts, inferences, and recommendations. Include URLs when you used web/X tools.",
+                "Produce a source-aware research brief. Separate confirmed facts, inferences, and recommendations. Include URLs when you used web/X tools. Prefer primary sources over summaries.",
             )
         )
     elif mode == "delegate":
         sections.append(
             markdown_block(
                 "Delegate Contract",
-                "Take the task as far as you can. If you inspect or change files, summarize exact evidence and paths. If blocked, explain the blocker precisely.",
+                "Take the task as far as the full local Grok capability allows within the authorized write boundary. If you inspect or change files, summarize exact evidence and paths. If blocked, explain the blocker precisely.",
             )
         )
     elif mode == "ask":
-        sections.append(markdown_block("Ask Contract", "Answer directly. Use tools only if the question requires them."))
+        sections.append(
+            markdown_block(
+                "Ask Contract",
+                "Answer directly and completely. Use tools whenever they improve factual accuracy; do not stay underpowered to save turns.",
+            )
+        )
     elif mode == "continue":
         sections.append(
             markdown_block(
@@ -401,9 +455,11 @@ def resolve_runtime_profile(args: argparse.Namespace, mode: str) -> None:
     defaults = PROFILE_DEFAULTS[profile]
     args.profile = profile
     if getattr(args, "max_turns", None) is None:
-        args.max_turns = defaults["max_turns"]
+        args.max_turns = None if mode in UNBOUNDED_REVIEW_MODES else defaults["max_turns"]
     if getattr(args, "timeout", None) is None:
         args.timeout = defaults["timeout"]
+    if getattr(args, "effort", None) is None and getattr(args, "reasoning_effort", None) is None:
+        args.effort = defaults["effort"]
     if getattr(args, "check", None) is None:
         args.check = profile == "full" and mode in AUTO_CHECK_MODES
 
@@ -466,11 +522,10 @@ def grok_command(meta: dict[str, Any]) -> list[str]:
         meta["prompt_path"],
         "--output-format",
         "json",
-        "--max-turns",
-        str(meta.get("max_turns") or DEFAULT_MAX_TURNS),
-        "--no-auto-update",
-        "--always-approve",
     ]
+    if meta.get("max_turns") is not None:
+        cmd.extend(["--max-turns", str(meta["max_turns"])])
+    cmd.extend(["--no-auto-update", "--always-approve"])
     if meta.get("model"):
         cmd.extend(["--model", meta["model"]])
     if meta.get("effort"):
@@ -1056,7 +1111,7 @@ def build_monitor_snapshot(job_dir: Path, tail_chars: int = 4000) -> dict[str, A
         "job_ok": (result.get("status") == "complete" if result else status == "complete") if terminal else None,
         "mode": meta.get("mode"),
         "profile": meta.get("profile") or DEFAULT_PROFILE,
-        "max_turns": meta.get("max_turns") or DEFAULT_MAX_TURNS,
+        "max_turns": meta.get("max_turns") if "max_turns" in meta else DEFAULT_MAX_TURNS,
         "timeout": timeout,
         "remaining_seconds": round(max(0.0, timeout - elapsed), 3) if not terminal else None,
         "check": bool(meta.get("check")),
@@ -1159,7 +1214,8 @@ def command_status(args: argparse.Namespace) -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(f"{snapshot['job_id']}  {snapshot['status']}  elapsed={snapshot['elapsed_seconds']}s")
-            print(f"  profile={snapshot['profile']}  turns={snapshot['max_turns']}  runtime={snapshot['timeout']}s")
+            turns = snapshot["max_turns"] if snapshot["max_turns"] is not None else "unlimited"
+            print(f"  profile={snapshot['profile']}  turns={turns}  runtime={snapshot['timeout']}s")
             print(f"  alive={str(snapshot['alive']).lower()}  session={snapshot['session_id'] or '-'}")
         return 0
     jobs = sorted([p for p in jobs_dir.iterdir() if (p / "meta.json").exists()])
@@ -1198,9 +1254,10 @@ def command_monitor(args: argparse.Namespace) -> int:
 
 
 def print_watch_snapshot(snapshot: dict[str, Any]) -> None:
+    turns = snapshot["max_turns"] if snapshot["max_turns"] is not None else "unlimited"
     print(f"Grok Job  {snapshot['job_id']}")
     print(f"status    {snapshot['status']}  elapsed {snapshot['elapsed_seconds']}s  alive {str(snapshot['alive']).lower()}")
-    print(f"runtime   {snapshot['profile']}  {snapshot['max_turns']} turns  {snapshot['timeout']}s  check {snapshot['check_strategy']}")
+    print(f"runtime   {snapshot['profile']}  {turns} turns  {snapshot['timeout']}s  check {snapshot['check_strategy']}")
     print(f"session   {snapshot['session_id'] or '-'}")
     preview = snapshot.get("result_preview") or snapshot.get("runner_stderr_tail") or "Process status only; Grok output is stored when the job exits."
     print("\n" + str(preview).strip())
@@ -1367,7 +1424,7 @@ def command_cancel(args: argparse.Namespace) -> int:
 
 
 def add_runtime_flags(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--grok-bin", default=os.environ.get("GROK_BIN", "grok"), help="Grok CLI binary (default: grok or GROK_BIN)")
+    parser.add_argument("--grok-bin", default=default_grok_bin(), help="Grok CLI binary (default: GROK_BIN, PATH, or a standard user install path)")
     parser.add_argument("--jobs-dir", help="Job artifact directory (default: repo/.grok-companion/jobs)")
     parser.add_argument("--model", help="Grok model id")
     parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="Grok reasoning effort alias")
@@ -1399,7 +1456,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_setup = sub.add_parser("setup", help="Check Grok CLI, models, job directory, and optional superx")
-    p_setup.add_argument("--grok-bin", default=os.environ.get("GROK_BIN", "grok"))
+    p_setup.add_argument("--grok-bin", default=default_grok_bin())
     p_setup.add_argument("--jobs-dir")
     p_setup.add_argument("--timeout", type=int, default=30)
     p_setup.add_argument("--probe-superx", action="store_true")
@@ -1442,7 +1499,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sessions = sub.add_parser("sessions", help="List or search Grok CLI sessions")
     p_sessions.add_argument("query", nargs="?", help="Optional search query")
-    p_sessions.add_argument("--grok-bin", default=os.environ.get("GROK_BIN", "grok"))
+    p_sessions.add_argument("--grok-bin", default=default_grok_bin())
     p_sessions.add_argument("--limit", type=int, default=20)
     p_sessions.add_argument("--timeout", type=int, default=30)
     p_sessions.add_argument("--json", action="store_true")
@@ -1477,7 +1534,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_wait = sub.add_parser("wait", help="Wait for a background job without repeated status polling")
     p_wait.add_argument("job_id", nargs="?")
     p_wait.add_argument("--jobs-dir")
-    p_wait.add_argument("--timeout", type=float, default=90.0, help="Maximum seconds to wait before returning")
+    p_wait.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_WAIT_TIMEOUT,
+        help="Maximum seconds to wait before returning (observation window only)",
+    )
     p_wait.add_argument("--poll-interval", type=float, default=0.25)
     p_wait.add_argument("--json", action="store_true")
     p_wait.set_defaults(func=command_wait)

@@ -2,6 +2,20 @@
 
 All notable changes to Grok Companion are documented here.
 
+## Unreleased
+
+## 0.4.4 - 2026-08-07
+
+- Add an Agent Plugins 1.0.0 portable surface: root `plugin.json` and `mcp.json` beside the existing Codex adapter.
+- Keep `.codex-plugin/plugin.json` and `.mcp.json` as the Codex install path; release checks now require portable/Codex MCP command parity and matching versions.
+- Mark the bundled skill with Agent Skills-compatible optional fields (`license`, `compatibility`, `metadata.agent_plugins`).
+- Document dual packaging and the public skill/plugin publishing convention under `docs/`.
+- Raise the default full-collaborator budget so Grok is not starved by the host: `full` uses effort `xhigh`, 7200s job runtime, no turn cap, and a 512000-character structured git/diff context budget.
+- Expand `quick` to 16 turns / 900s for short tasks, keep structured review/adversarial-review uncapped unless `max_turns` is explicit, and expose MCP `context_limit`.
+- When embedded git context is truncated, instruct Grok to tool-read the remainder instead of treating the packet as complete.
+- Align skill/runtime language with a full-collaborator bridge model (inspired by `openai/codex-plugin-cc`), and raise default `grok_wait` observation window to 180s.
+- Discover Grok automatically from standard user install paths when the Codex MCP host does not inherit the shell PATH.
+
 ## 0.4.3 - 2026-08-03
 
 - Add an opt-in host-policy activation path so a pre-authorized capability-aware router can select Grok without requiring the user to name it again in every task.

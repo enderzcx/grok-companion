@@ -303,7 +303,7 @@
     text("profile", job.profile || "full");
     text("job-id", job.job_id || "未找到 job id");
     text("elapsed", seconds(job.elapsed_seconds));
-    text("runtime", `${job.profile || "full"} / ${job.max_turns || "-"} turns / ${seconds(job.timeout)}`);
+    text("runtime", `${job.profile || "full"} / ${job.max_turns == null ? "unlimited" : job.max_turns} turns / ${seconds(job.timeout)}`);
     text("check", job.check ? (job.check_strategy || "开启") : "关闭");
     text("process", terminal ? "已结束" : (job.alive ? `运行中 / PID ${job.pid}` : "未检测到"));
     text("remaining", terminal ? "已结算" : seconds(job.remaining_seconds));

@@ -3,8 +3,9 @@
 ## Launch And Wait
 
 1. Keep the returned `job_id`.
-2. Call `grok_wait` with a bounded wait budget. Do not repeatedly call `grok_status` in a tight loop.
-3. If `grok_wait` returns `completed: false`, it also returns `job_ok: null` and `next_action: wait_same_job`. Preserve the same `job_id` and call `grok_wait` again. The wait budget is not the job runtime budget.
+2. Call `grok_wait` with a bounded observation window (default 180s). Do not repeatedly call `grok_status` in a tight loop.
+3. If `grok_wait` returns `completed: false`, it also returns `job_ok: null` and `next_action: wait_same_job`. Preserve the same `job_id` and call `grok_wait` again. The wait budget is not the job runtime budget; full collaboration jobs may need many waits.
+
 4. If it returns `completed: true` with `job_ok: false`, treat the terminal job as failed, timed out, cancelled, or unrecoverable even though the wait operation itself completed.
 5. When complete and `job_ok: true`, present the stored result. Do not restart the same task unless the user asks for a fresh run.
 6. Do not cancel or restart an incomplete job just to fit a Codex turn. If execution must hand off, report the preserved `job_id` and leave the job running.
@@ -12,11 +13,12 @@
 
 ## Review Results
 
-- Present findings first, ordered by severity.
+- Present findings first, ordered by severity. Preserve the full finding set; do not collapse material issues for brevity.
 - Preserve Grok's file paths, line numbers, confidence, uncertainty, and verdict.
 - Say explicitly when there are no findings and mention residual test risk briefly.
 - Review is read-only. Do not edit files merely because Grok returned a finding.
-- Codex must verify every accepted finding against the current repository before changing code.
+- The host must verify every accepted finding against the current repository before changing code.
+- Prefer an independent second model for host-side meta-review of this plugin's own changes; do not default to Grok reviewing Grok-authored work when another collaborator is available.
 - A malformed review contract is a failed review result, even when prose was produced. Report the preserved raw result and contract error.
 
 ## Delegate Results

@@ -4,13 +4,13 @@
 
 Use the local **Grok CLI** as a full external collaborator inside **Codex**.
 
-Grok Companion v0.4.3 is a Codex plugin with 14 native MCP tools for consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
+Grok Companion v0.4.4 is a Codex plugin with 14 native MCP tools, plus an [Agent Plugins](https://agent-plugins.org/) 1.0.0 portable package surface. It covers consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
 
 > **This is not a Codex sidebar terminal.**
 >
 > It does not embed Grok as a persistent shell or sidebar chat. v0.4 adds a conversation-native Rich Visualization Job Monitor and an optional user-opened terminal `watch`, both backed by the same local `grok` job and artifacts.
 
-The product direction is inspired by [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc), but this is a Codex plugin, not a Claude Code slash-command plugin.
+The product direction is inspired by [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc). Codex remains the primary install path; the portable core follows Agent Plugins + Agent Skills and is not a Claude Code slash-command plugin.
 
 ## Capabilities
 
@@ -35,25 +35,40 @@ The product direction is inspired by [openai/codex-plugin-cc](https://github.com
 
 ## Why MCP
 
-v0.1 required Codex to shell out to `grb.py`. Since v0.2, the plugin registers a local stdio MCP server so Codex receives first-class `grok_*` tools:
+v0.1 required Codex to shell out to `grb.py`. Since v0.2, the plugin registers a local stdio MCP server so Codex receives first-class `grok_*` tools.
+
+Portable Agent Plugins surface (`plugins/grok-companion/mcp.json`):
 
 ```json
 {
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
   "mcpServers": {
     "grok-companion": {
+      "type": "stdio",
       "command": "python3",
       "args": ["./scripts/mcp_server.py"],
-      "cwd": "."
+      "cwd": "${PLUGIN_ROOT}"
     }
   }
 }
 ```
 
+The Codex adapter still uses `.mcp.json`, keeping the same `command` / `args` and adding an `env_vars` allowlist for proxy, certificate, `GROK_BIN`, and jobs-directory variables so the MCP child does not silently lose networking that works in the user's shell.
+
 `mcp_server.py` handles protocol messages, argument validation, and structured results. It delegates every task to `grb.py`, so MCP and CLI share one prompt builder, git-context collector, job model, and artifact format.
 
 The MCP server uses only the Python standard library and needs no additional pip packages.
 
-The plugin uses Codex's `env_vars` allowlist to forward common proxy, certificate, `GROK_BIN`, and jobs-directory variables, so the MCP child does not silently lose networking that works in the user's shell.
+## Dual packaging
+
+| Surface | Files | Purpose |
+|---|---|---|
+| Agent Plugins portable core | `plugin.json`, `mcp.json`, `skills/` | Open standard shape for compatible clients |
+| Codex adapter | `.codex-plugin/plugin.json`, `.mcp.json`, `.agents/plugins/marketplace.json` | Current Codex install path |
+| Publishing convention | [docs/PUBLIC_SKILL_PLUGIN_PUBLISHING.md](./docs/PUBLIC_SKILL_PLUGIN_PUBLISHING.md) | Ender public skill/plugin rules |
+| Repo details | [docs/AGENT_PLUGINS.md](./docs/AGENT_PLUGINS.md) | Dual-surface consistency notes |
+
+Personal local skill OS trees under `~/.agents/skills` are **not** mass-migrated to Agent Plugins. Only intentional public distribution units use dual format.
 
 ## Background By Default
 
@@ -89,13 +104,13 @@ It is a refreshable status snapshot, not a pretend live token stream. The curren
 
 ## Full And Quick Profiles
 
-Formal Grok collaboration defaults to `profile=full`: `max_turns=30` and a 3600-second job runtime. `review`, `adversarial-review`, and `research` also enable Grok self-check by default under full. These defaults let Grok explore and verify a complete answer; do not reduce them merely to fit one Codex wait window.
+Formal Grok collaboration defaults to `profile=full`: the plugin does not pass `--max-turns`, effort defaults to `xhigh`, the job runtime is 7200 seconds, and structured/git context defaults to `context_limit=512000` characters. `review`, `adversarial-review`, and `research` also enable Grok self-check under full. The goal is a complete Grok collaborator bridge (same product stance as `openai/codex-plugin-cc` for Codex), not a starved one-shot helper. When the embedded packet is truncated, the prompt tells Grok to tool-read the rest of the repo.
 
-`profile=quick` is an explicit lightweight mode: `max_turns=6`, a 300-second job runtime, and no automatic self-check. Use it for connectivity smokes, fixed short answers, or an explicitly requested quick call.
+`profile=quick` is an explicit lightweight mode: ordinary tasks use `max_turns=16`, effort `high`, a 900-second job runtime, and no automatic self-check. Use it for connectivity smokes, fixed short answers, or an explicitly requested quick call. Structured `review` and `adversarial-review` are exceptions: even under quick, they remain uncapped unless the caller explicitly supplies `max_turns`.
 
-Explicit `max_turns`, `timeout`, and `check` values override the profile. The CLI supports both `--check` and `--no-check`; MCP `check: true|false` is also explicit. Grok CLI currently rejects `--check` together with `--json-schema`, so structured reviews use a schema-safe prompt self-check while research uses native `--check`. Job metadata records `check_strategy` as `prompt`, `native`, or `off`.
+Explicit `max_turns`, `timeout`, and `check` values override the profile; structured reviews accept a turn cap only from an explicit `max_turns`. The CLI supports both `--check` and `--no-check`; MCP `check: true|false` is also explicit. Grok CLI currently rejects `--check` together with `--json-schema`, so structured reviews use a schema-safe prompt self-check while research uses native `--check`. Job metadata records `check_strategy` as `prompt`, `native`, or `off`.
 
-A launch tool's `timeout` is the total Grok job runtime. The separate `grok_wait` timeout is only one observation window, remains capped at 300 seconds, and never stops the background job.
+A launch tool's `timeout` is the total Grok job runtime. The separate `grok_wait` timeout is only one observation window (default 180 seconds, MCP max 600) and never stops the background job. Explicit `context_limit` raises the embedded git/diff budget when needed.
 
 ## Structured Reviews
 
@@ -248,12 +263,13 @@ Foreground and background tasks write durable artifacts under the current git re
 
 ## Architecture
 
-1. **Plugin surface**: `.codex-plugin/plugin.json`, `.mcp.json`, and the skill
-2. **MCP adapter**: `scripts/mcp_server.py`
-3. **Job runtime**: `scripts/grb.py`, background processes, and artifacts
-4. **Capability adapters**: local Grok CLI, git context, and optional `superx` diagnostics
+1. **Agent Plugins portable surface**: `plugin.json`, `mcp.json`, and `skills/`
+2. **Codex adapter surface**: `.codex-plugin/plugin.json`, `.mcp.json`, and marketplace
+3. **MCP adapter**: `scripts/mcp_server.py`
+4. **Job runtime**: `scripts/grb.py`, background processes, and artifacts
+5. **Capability adapters**: local Grok CLI, git context, and optional `superx` diagnostics
 
-See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
+See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) and [docs/AGENT_PLUGINS.md](./docs/AGENT_PLUGINS.md).
 
 ## Tests And CI
 

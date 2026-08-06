@@ -404,7 +404,8 @@ class McpServerTests(unittest.TestCase):
                 self.assertFalse(waited["isError"])
                 meta = json.loads((jobs / launch["job_id"] / "meta.json").read_text(encoding="utf-8"))
                 raw = json.loads((jobs / launch["job_id"] / "raw.stdout").read_text(encoding="utf-8"))
-                self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["check"]), ("quick", 6, 300, False))
+                self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["check"]), ("quick", None, 900, False))
+                self.assertNotIn("--max-turns", raw["argv"])
                 self.assertNotIn("--check", raw["argv"])
             finally:
                 client.close()
@@ -435,7 +436,9 @@ class McpServerTests(unittest.TestCase):
                     job = jobs / launch["job_id"]
                     meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
                     raw = json.loads((job / "raw.stdout").read_text(encoding="utf-8"))
-                    self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["check"]), ("full", 30, 3600, True))
+                    self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["effort"], meta["check"]), ("full", None, 7200, "xhigh", True))
+                    self.assertNotIn("--max-turns", raw["argv"])
+                    self.assertEqual(raw["argv"][raw["argv"].index("--effort") + 1], "xhigh")
                     self.assertEqual(meta["check_strategy"], expected_strategy)
                     self.assertEqual("--check" in raw["argv"], native_flag)
             finally:

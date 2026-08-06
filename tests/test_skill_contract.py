@@ -13,6 +13,8 @@ VALIDATOR = ROOT / "plugins" / "grok-companion" / "skills" / "grok-companion" / 
 
 
 class SkillContractTests(unittest.TestCase):
+    PLUGIN = ROOT / "plugins" / "grok-companion"
+
     def run_validator(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, str(VALIDATOR), *args],
@@ -21,6 +23,36 @@ class SkillContractTests(unittest.TestCase):
             capture_output=True,
             timeout=10,
         )
+
+    def test_agent_plugins_portable_surface(self):
+        portable = json.loads((self.PLUGIN / "plugin.json").read_text(encoding="utf-8"))
+        codex = json.loads((self.PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        mcp = json.loads((self.PLUGIN / "mcp.json").read_text(encoding="utf-8"))
+        codex_mcp = json.loads((self.PLUGIN / ".mcp.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            portable["$schema"],
+            "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+        )
+        self.assertEqual(portable["name"], codex["name"])
+        self.assertEqual(portable["version"], codex["version"])
+        self.assertIn("com.openai.codex", portable["extensions"])
+
+        self.assertEqual(
+            mcp["$schema"],
+            "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+        )
+        portable_server = mcp["mcpServers"]["grok-companion"]
+        codex_server = codex_mcp["mcpServers"]["grok-companion"]
+        self.assertEqual(portable_server["type"], "stdio")
+        self.assertEqual(portable_server["command"], codex_server["command"])
+        self.assertEqual(portable_server["args"], codex_server["args"])
+        self.assertEqual(portable_server["cwd"], "${PLUGIN_ROOT}")
+        self.assertIn("GROK_BIN", codex_server["env_vars"])
+
+        skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn('agent_plugins: "1.0.0"', skill)
+        self.assertIn("license: MIT", skill)
 
     def test_list_exposes_only_bounded_sop_files(self):
         proc = self.run_validator("list")
@@ -50,6 +82,10 @@ class SkillContractTests(unittest.TestCase):
         handling = (SKILL_DIR / "references" / "result-handling.md").read_text(encoding="utf-8")
         combined = skill + "\n" + handling
         self.assertIn("profile=full", combined)
+        self.assertIn("no plugin-imposed turn cap", combined)
+        self.assertIn("effort `xhigh`", combined)
+        self.assertIn("512000", combined)
+        self.assertIn("stay uncapped unless the caller explicitly supplies `max_turns`", combined)
         self.assertIn("same `job_id`", combined)
         self.assertIn("`job_ok: null`", combined)
         self.assertIn("wait_same_job", combined)

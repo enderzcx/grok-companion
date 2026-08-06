@@ -1,0 +1,32 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "grok-companion",
+  "version": "0.4.4",
+  "description": "Use the local Grok CLI as a complete external collaborator: consult, review, research, delegate, and manage jobs through skills and MCP tools.",
+  "author": {
+    "name": "Ender",
+    "url": "https://github.com/enderzcx"
+  },
+  "homepage": "https://github.com/enderzcx/grok-companion",
+  "repository": "https://github.com/enderzcx/grok-companion",
+  "license": "MIT",
+  "keywords": [
+    "grok",
+    "codex",
+    "agent-plugins",
+    "mcp",
+    "review",
+    "research",
+    "agent"
+  ],
+  "extensions": {
+    "com.openai.codex": {
+      "manifest": ".codex-plugin/plugin.json",
+      "mcp": ".mcp.json",
+      "installSelector": "grok-companion@enderzcx"
+    },
+    "com.xai.grok": {
+      "note": "Grok marketplace install remains client-native; portable core is plugin.json + mcp.json + skills/."
+    }
+  }
+}

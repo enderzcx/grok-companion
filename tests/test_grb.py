@@ -105,6 +105,36 @@ class GrbTests(unittest.TestCase):
             self.assertEqual(payload["status"], "ok")
             self.assertTrue(payload["checks"]["grok_version"]["ok"])
 
+    def test_setup_discovers_standard_user_install_without_host_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            home = tmp / "home"
+            grok = home / ".local" / "bin" / "grok"
+            grok.parent.mkdir(parents=True)
+            grok.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = version ]; then echo 'grok local 0.0.0'; exit 0; fi\n"
+                "if [ \"$1\" = models ]; then echo 'Default model: fake-grok'; exit 0; fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            grok.chmod(0o755)
+            env = {**os.environ, "HOME": str(home), "PATH": "/usr/bin:/bin"}
+            env.pop("GROK_BIN", None)
+            proc = subprocess.run(
+                [sys.executable, str(GRB), "setup", "--json", "--jobs-dir", str(tmp / "jobs")],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=20,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["grok_bin"], str(grok))
+            self.assertEqual(payload["grok_path"], str(grok))
+            self.assertEqual(payload["status"], "ok")
+
     def test_setup_degrades_when_grok_checks_fail(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -193,9 +223,12 @@ class GrbTests(unittest.TestCase):
                 meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
                 raw = json.loads((job / "raw.stdout").read_text(encoding="utf-8"))
                 self.assertEqual(meta["profile"], "full")
-                self.assertEqual(meta["max_turns"], 30)
-                self.assertEqual(meta["timeout"], 3600)
+                self.assertIsNone(meta["max_turns"])
+                self.assertEqual(meta["timeout"], 7200)
+                self.assertEqual(meta["effort"], "xhigh")
                 self.assertEqual(meta["check"], expected_check)
+                self.assertNotIn("--max-turns", raw["argv"])
+                self.assertEqual(raw["argv"][raw["argv"].index("--effort") + 1], "xhigh")
                 expected_strategy = "prompt" if mode in {"review", "adversarial-review"} else "native" if expected_check else "off"
                 self.assertEqual(meta["check_strategy"], expected_strategy)
                 self.assertEqual("--check" in raw["argv"], mode == "research")
@@ -211,7 +244,7 @@ class GrbTests(unittest.TestCase):
             quick_job = next(quick_jobs.iterdir())
             quick_meta = json.loads((quick_job / "meta.json").read_text(encoding="utf-8"))
             quick_raw = json.loads((quick_job / "raw.stdout").read_text(encoding="utf-8"))
-            self.assertEqual((quick_meta["max_turns"], quick_meta["timeout"], quick_meta["check"]), (6, 300, False))
+            self.assertEqual((quick_meta["max_turns"], quick_meta["timeout"], quick_meta["effort"], quick_meta["check"]), (16, 900, "high", False))
             self.assertNotIn("--check", quick_raw["argv"])
 
             override_jobs = tmp / "override-jobs"
@@ -224,6 +257,8 @@ class GrbTests(unittest.TestCase):
                 "45",
                 "--timeout",
                 "7200",
+                "--effort",
+                "low",
                 "--check",
                 "--jobs-dir",
                 str(override_jobs),
@@ -232,10 +267,11 @@ class GrbTests(unittest.TestCase):
             self.assertEqual(overridden.returncode, 0, overridden.stderr)
             override_job = next(override_jobs.iterdir())
             override_meta = json.loads((override_job / "meta.json").read_text(encoding="utf-8"))
-            self.assertEqual((override_meta["max_turns"], override_meta["timeout"], override_meta["check"]), (45, 7200, True))
+            self.assertEqual((override_meta["max_turns"], override_meta["timeout"], override_meta["effort"], override_meta["check"]), (45, 7200, "low", True))
             self.assertEqual(override_meta["check_strategy"], "prompt")
             override_raw = json.loads((override_job / "raw.stdout").read_text(encoding="utf-8"))
             self.assertNotIn("--check", override_raw["argv"])
+            self.assertEqual(override_raw["argv"][override_raw["argv"].index("--effort") + 1], "low")
 
             no_check_jobs = tmp / "no-check-jobs"
             no_check = self.run_grb(tmp, "review", "--no-check", "--jobs-dir", str(no_check_jobs), "force off")
@@ -499,7 +535,8 @@ class GrbTests(unittest.TestCase):
             meta = json.loads((latest / "meta.json").read_text(encoding="utf-8"))
             self.assertIn("--resume", raw["argv"])
             self.assertIn("11111111-1111-4111-8111-111111111111", raw["argv"])
-            self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["check"]), ("full", 30, 3600, False))
+            self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["effort"], meta["check"]), ("full", None, 7200, "xhigh", False))
+            self.assertNotIn("--max-turns", raw["argv"])
 
             sessions = self.run_grb(tmp, "sessions", "--json")
             self.assertEqual(sessions.returncode, 0, sessions.stderr)
