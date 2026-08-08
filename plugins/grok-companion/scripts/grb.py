@@ -51,6 +51,14 @@ JOB_ROOT_NAME = ".grok-companion"
 TERMINAL_STATUSES = {"complete", "failed", "timeout", "cancelled", "unknown"}
 REVIEW_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "review-output.schema.json"
 MONITOR_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "skills" / "grok-companion" / "templates" / "job-monitor.html"
+PROXY_ENV_NAMES = {
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+}
 
 
 class ReviewSchemaError(RuntimeError):
@@ -93,6 +101,76 @@ def default_grok_bin() -> str:
             return str(candidate)
 
     return "grok"
+
+
+def parse_macos_system_proxy(output: str) -> dict[str, str]:
+    """Translate enabled `scutil --proxy` entries into standard proxy env vars."""
+
+    def value(name: str) -> str | None:
+        match = re.search(rf"^\s*{re.escape(name)}\s*:\s*(.*?)\s*$", output, re.MULTILINE)
+        return match.group(1) if match else None
+
+    def endpoint(prefix: str, scheme: str = "http") -> str | None:
+        if value(f"{prefix}Enable") != "1":
+            return None
+        host = value(f"{prefix}Proxy")
+        port = value(f"{prefix}Port")
+        if not host or not port or not port.isdigit():
+            return None
+        return f"{scheme}://{host}:{port}"
+
+    http_proxy = endpoint("HTTP")
+    https_proxy = endpoint("HTTPS") or http_proxy
+    socks_proxy = endpoint("SOCKS", "socks5h")
+    fallback_proxy = https_proxy or http_proxy or socks_proxy
+    if not fallback_proxy:
+        return {}
+
+    proxies: dict[str, str] = {}
+    if http_proxy:
+        proxies.update({"HTTP_PROXY": http_proxy, "http_proxy": http_proxy})
+    if https_proxy:
+        proxies.update({"HTTPS_PROXY": https_proxy, "https_proxy": https_proxy})
+    proxies.update({"ALL_PROXY": fallback_proxy, "all_proxy": fallback_proxy})
+
+    exceptions = re.search(
+        r"ExceptionsList\s*:\s*<array>\s*\{(?P<body>.*?)^\s*\}",
+        output,
+        re.MULTILINE | re.DOTALL,
+    )
+    if exceptions:
+        values = re.findall(r"^\s*\d+\s*:\s*(.*?)\s*$", exceptions.group("body"), re.MULTILINE)
+        if values:
+            no_proxy = ",".join(values)
+            proxies.update({"NO_PROXY": no_proxy, "no_proxy": no_proxy})
+    return proxies
+
+
+def apply_system_proxy_fallback(env: dict[str, str] | None = None) -> str:
+    """Use the active macOS system proxy only when no explicit proxy env exists."""
+
+    target = os.environ if env is None else env
+    if any(target.get(name) for name in PROXY_ENV_NAMES):
+        return "environment"
+    if sys.platform != "darwin":
+        return "none"
+    try:
+        proc = subprocess.run(
+            ["scutil", "--proxy"],
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "none"
+    if proc.returncode != 0:
+        return "none"
+    proxies = parse_macos_system_proxy(proc.stdout or "")
+    if not proxies:
+        return "none"
+    target.update(proxies)
+    return "macos-system"
 
 
 def ensure_dir(path: Path) -> None:
@@ -1570,6 +1648,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    apply_system_proxy_fallback()
     parser = build_parser()
     args = parser.parse_args(argv)
     return int(args.func(args) or 0)

@@ -4,6 +4,8 @@ All notable changes to Grok Companion are documented here.
 
 ## Unreleased
 
+- Recover Grok connectivity in macOS GUI/MCP hosts that do not inherit shell proxy variables by falling back to the active system HTTP/HTTPS proxy; explicit proxy environment variables still take precedence.
+
 ## 0.4.5 - 2026-08-07
 
 - Hotfix after live CLI verification on Grok 0.2.118 + default `grok-4.5`: default effort is `high` again because `xhigh` and `max` are rejected (`use one of: high, medium, low`).
