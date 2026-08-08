@@ -9,11 +9,21 @@ import tempfile
 import textwrap
 import time
 import unittest
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 GRB = ROOT / "plugins" / "grok-companion" / "scripts" / "grb.py"
+
+
+def load_grb_module():
+    spec = spec_from_file_location("grok_companion_grb", GRB)
+    module = module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def make_fake_grok(tmp: Path) -> Path:
@@ -104,6 +114,47 @@ class GrbTests(unittest.TestCase):
             payload = json.loads(proc.stdout)
             self.assertEqual(payload["status"], "ok")
             self.assertTrue(payload["checks"]["grok_version"]["ok"])
+
+    def test_macos_system_proxy_fallback_populates_empty_environment(self):
+        grb = load_grb_module()
+        output = """\
+<dictionary> {
+  ExceptionsList : <array> {
+    0 : 127.0.0.1
+    1 : localhost
+    2 : *.local
+  }
+  HTTPEnable : 1
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7890
+  HTTPSProxy : 127.0.0.1
+  SOCKSEnable : 1
+  SOCKSPort : 7890
+  SOCKSProxy : 127.0.0.1
+}
+"""
+        completed = subprocess.CompletedProcess(["scutil", "--proxy"], 0, output, "")
+        env = {}
+        with mock.patch.object(grb.sys, "platform", "darwin"), mock.patch.object(
+            grb.subprocess, "run", return_value=completed
+        ):
+            source = grb.apply_system_proxy_fallback(env)
+        self.assertEqual(source, "macos-system")
+        self.assertEqual(env["HTTP_PROXY"], "http://127.0.0.1:7890")
+        self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:7890")
+        self.assertEqual(env["ALL_PROXY"], "http://127.0.0.1:7890")
+        self.assertEqual(env["NO_PROXY"], "127.0.0.1,localhost,*.local")
+
+    def test_explicit_proxy_environment_skips_system_fallback(self):
+        grb = load_grb_module()
+        env = {"HTTPS_PROXY": "http://explicit.invalid:8080"}
+        with mock.patch.object(grb.subprocess, "run") as run:
+            source = grb.apply_system_proxy_fallback(env)
+        self.assertEqual(source, "environment")
+        self.assertEqual(env, {"HTTPS_PROXY": "http://explicit.invalid:8080"})
+        run.assert_not_called()
 
     def test_setup_discovers_standard_user_install_without_host_path(self):
         with tempfile.TemporaryDirectory() as td:

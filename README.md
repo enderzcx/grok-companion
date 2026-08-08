@@ -104,6 +104,8 @@ Codex 调用 grok_review / grok_research / grok_continue / ...
 
 ## Full 与 Quick
 
+在 macOS GUI / MCP 宿主没有继承 shell 代理变量时，Grok Companion 会读取当前启用的系统 HTTP/HTTPS 代理并仅用于 Grok 子进程。显式的 `HTTP_PROXY`、`HTTPS_PROXY` 或 `ALL_PROXY` 始终优先；插件不会硬编码某台机器的代理地址。
+
 正式 Grok 协作默认使用 `profile=full`：插件不主动传 `--max-turns`，`effort=high`，job runtime `timeout=7200` 秒，结构化/git context 默认 `context_limit=256000` 字符。`review`、`adversarial-review` 和 `research` 在 full 下默认开启 Grok 自检。设计目标是让 Grok 作为**完整协作者**工作（类似 `openai/codex-plugin-cc` 对 Codex 的态度），而不是被宿主 turn 预算饿死。
 
 > 实测（Grok CLI 0.2.118 + 默认 `grok-4.5`）：`--effort` 只接受 `high|medium|low`。`xhigh` / `max` 会直接失败：`unknown effort level ... use one of: high, medium, low`。`context_limit` 是 companion 塞进 prompt 的字符预算，不是模型上下文窗口；不要默认塞 1M。
