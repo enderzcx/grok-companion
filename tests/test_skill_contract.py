@@ -87,6 +87,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("256000", combined)
         self.assertIn("stay uncapped unless the caller explicitly supplies `max_turns`", combined)
         self.assertIn("use one of: high, medium, low", combined)
+        self.assertIn("recover from explicit `reqwest` streaming transport failures twice", combined)
+        self.assertIn("recovery resumes it with tools disabled", combined)
         self.assertIn("same `job_id`", combined)
         self.assertIn("`job_ok: null`", combined)
         self.assertIn("wait_same_job", combined)

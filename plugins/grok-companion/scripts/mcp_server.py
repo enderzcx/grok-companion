@@ -75,6 +75,12 @@ RUNTIME_PROPERTIES: dict[str, Any] = {
         "maximum": 86400,
         "description": "Job runtime in seconds, not the grok_wait observation window. full defaults to 7200.",
     },
+    "transport_retries": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 5,
+        "description": "Recovery count for retryable Grok transport failures. Defaults to 2 for read-only review/adversarial-review and is forced to 0 for other modes. Recoveries share the job timeout budget.",
+    },
     "context_limit": {
         "type": "integer",
         "minimum": 1000,
@@ -334,6 +340,7 @@ def launch_tool(name: str, args: dict[str, Any]) -> tuple[int, Any, str, str]:
         "profile",
         "max_turns",
         "timeout",
+        "transport_retries",
         "context_limit",
         "tools",
         "disallowed_tools",
@@ -508,6 +515,7 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                         "uses job_ok=null and next_action=wait_same_job; it does not justify cancellation or restart. "
                         "Only terminal job_ok=false is a job failure. Full is the default complete-collaborator profile "
                         "(no turn cap, effort high, 7200s runtime, 256k-char structured context); quick is opt-in smoke only. "
+                        "Read-only structured reviews retry explicit reqwest transport failures twice inside the same job timeout. "
                         "Do not add max_turns merely to fit one host wait. Do not pass xhigh/max effort on models that "
                         "only advertise low|medium|high. Use grok_monitor for a refreshable inline job snapshot, and "
                         "grok_sessions plus grok_continue for continuity. Use superx for exact X/Twitter retrieval."

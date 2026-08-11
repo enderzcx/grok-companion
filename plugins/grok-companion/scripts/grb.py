@@ -39,6 +39,20 @@ AUTO_CHECK_MODES = {"review", "adversarial-review", "research"}
 # All full-profile modes leave max_turns unset unless the caller overrides; structured
 # reviews also stay uncapped under quick unless max_turns is explicit.
 UNBOUNDED_REVIEW_MODES = {"review", "adversarial-review"}
+TRANSPORT_RETRY_MODES = {"review", "adversarial-review"}
+DEFAULT_REVIEW_TRANSPORT_RETRIES = 2
+TRANSPORT_RETRY_PROMPT = """Continue the current review session after the response stream was interrupted.
+Reuse the analysis already completed in this session. Do not repeat repository exploration or call tools.
+Emit only the final JSON object required by the active review schema, with no surrounding prose.
+"""
+RETRYABLE_TRANSPORT_MARKERS = (
+    "reqwest error stream:",
+    "error sending request for url",
+    "transport error:",
+    "error decoding response body",
+    "connection reset by peer",
+    "connection closed before message completed",
+)
 DEFAULT_TIMEOUT = PROFILE_DEFAULTS[DEFAULT_PROFILE]["timeout"]
 DEFAULT_MAX_TURNS = PROFILE_DEFAULTS[DEFAULT_PROFILE]["max_turns"]
 # Embedded git/diff packet size in characters. 80k was too small for multi-file reviews;
@@ -546,6 +560,10 @@ def resolve_runtime_profile(args: argparse.Namespace, mode: str) -> None:
         args.effort = defaults["effort"]
     if getattr(args, "check", None) is None:
         args.check = profile == "full" and mode in AUTO_CHECK_MODES
+    if getattr(args, "transport_retries", None) is None:
+        args.transport_retries = DEFAULT_REVIEW_TRANSPORT_RETRIES if mode in TRANSPORT_RETRY_MODES else 0
+    elif mode not in TRANSPORT_RETRY_MODES:
+        args.transport_retries = 0
 
 
 def resolved_check_strategy(mode: str, check: bool) -> str:
@@ -563,6 +581,11 @@ def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: di
     job_dir = jobs_dir / job_id
     ensure_dir(job_dir)
     (job_dir / "prompt.md").write_text(prompt, encoding="utf-8")
+    transport_retries = max(0, int(getattr(args, "transport_retries", 0) or 0))
+    retry_session_id = None
+    if mode in TRANSPORT_RETRY_MODES and transport_retries:
+        retry_session_id = getattr(args, "session_id", None) or str(uuid.uuid4())
+        (job_dir / "transport-retry-prompt.md").write_text(TRANSPORT_RETRY_PROMPT, encoding="utf-8")
     if git_context is not None:
         atomic_write_text(job_dir / "context.json", json.dumps(git_context, ensure_ascii=False, indent=2) + "\n")
     meta = {
@@ -588,6 +611,10 @@ def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: di
         "check": getattr(args, "check", False),
         "check_strategy": resolved_check_strategy(mode, getattr(args, "check", False)),
         "best_of_n": getattr(args, "best_of_n", None),
+        "transport_retries": transport_retries,
+        "transport_retry_strategy": "resume-finalize" if retry_session_id else "off",
+        "transport_retry_session_id": retry_session_id,
+        "transport_retry_prompt_path": str(job_dir / "transport-retry-prompt.md") if retry_session_id else None,
         "session_id": getattr(args, "session_id", None),
         "format": getattr(args, "format", "md"),
         "prompt_path": str(job_dir / "prompt.md"),
@@ -599,11 +626,12 @@ def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: di
     return job_id, job_dir, meta
 
 
-def grok_command(meta: dict[str, Any]) -> list[str]:
+def grok_command(meta: dict[str, Any], *, transport_retry: bool = False) -> list[str]:
+    prompt_path = meta.get("transport_retry_prompt_path") if transport_retry else meta["prompt_path"]
     cmd = [
         meta.get("grok_bin") or "grok",
         "--prompt-file",
-        meta["prompt_path"],
+        prompt_path,
         "--output-format",
         "json",
     ]
@@ -618,15 +646,21 @@ def grok_command(meta: dict[str, Any]) -> list[str]:
         cmd.extend(["--reasoning-effort", meta["reasoning_effort"]])
     if meta.get("best_of_n"):
         cmd.extend(["--best-of-n", str(meta["best_of_n"])])
-    if meta.get("session_id"):
+    if transport_retry and meta.get("transport_retry_session_id"):
+        cmd.extend(["--resume", meta["transport_retry_session_id"]])
+    elif meta.get("session_id"):
         cmd.extend(["--resume", meta["session_id"]])
+    elif meta.get("transport_retry_session_id"):
+        cmd.extend(["--session-id", meta["transport_retry_session_id"]])
     if meta.get("mode") in {"review", "adversarial-review"}:
         try:
             schema = REVIEW_SCHEMA_PATH.read_text(encoding="utf-8")
         except OSError as exc:
             raise ReviewSchemaError(f"review schema unavailable: {REVIEW_SCHEMA_PATH}: {exc}") from exc
         cmd.extend(["--json-schema", schema])
-    if meta.get("tools") is not None:
+    if transport_retry:
+        cmd.extend(["--tools", ""])
+    elif meta.get("tools") is not None:
         cmd.extend(["--tools", meta["tools"]])
     if meta.get("disallowed_tools"):
         cmd.extend(["--disallowed-tools", meta["disallowed_tools"]])
@@ -791,6 +825,143 @@ def finalize_runtime_failure(job_dir: Path, meta: dict[str, Any], message: str, 
     return returncode
 
 
+def retryable_transport_error(stdout: str, stderr: str) -> str | None:
+    combined = "\n".join(part.strip() for part in (stderr, stdout) if part.strip())
+    lowered = combined.lower()
+    if not any(marker in lowered for marker in RETRYABLE_TRANSPORT_MARKERS):
+        return None
+    _text, parsed = extract_text(stdout)
+    if isinstance(parsed, dict) and isinstance(parsed.get("message"), str):
+        return parsed["message"].strip()
+    for line in combined.splitlines():
+        if any(marker in line.lower() for marker in RETRYABLE_TRANSPORT_MARKERS):
+            return line.removeprefix("Error: ").strip()
+    return combined[-4000:]
+
+
+def subprocess_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
+def run_grok_with_transport_retries(
+    meta: dict[str, Any], cmd: list[str], job_dir: Path
+) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]], str | None]:
+    retry_limit = max(0, int(meta.get("transport_retries") or 0))
+    total_timeout = max(1, int(meta.get("timeout") or DEFAULT_TIMEOUT))
+    deadline = time.monotonic() + total_timeout
+    attempts: list[dict[str, Any]] = []
+    final_transport_error: str | None = None
+
+    for attempt_number in range(1, retry_limit + 2):
+        attempt_cmd = cmd if attempt_number == 1 else grok_command(meta, transport_retry=True)
+        remaining_budget = deadline - time.monotonic()
+        remaining = max(1, int(remaining_budget))
+        started = time.monotonic()
+        try:
+            if remaining_budget <= 0:
+                raise subprocess.TimeoutExpired(attempt_cmd, 0)
+            proc = subprocess.run(
+                attempt_cmd,
+                cwd=meta.get("cwd") or None,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                capture_output=True,
+                timeout=remaining,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = subprocess_text(exc.stdout)
+            stderr = subprocess_text(exc.stderr)
+            timeout_message = f"Timed out after exhausting the {total_timeout}s job deadline"
+            if stderr and not stderr.endswith("\n"):
+                stderr += "\n"
+            stderr += timeout_message + "\n"
+            attempts.append(
+                {
+                    "attempt": attempt_number,
+                    "returncode": 124,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "retryable_transport_error": False,
+                    "will_retry": False,
+                    "timed_out": True,
+                    "started": True,
+                    "strategy": "initial" if attempt_number == 1 else "resume-finalize",
+                    "session_id": meta.get("transport_retry_session_id"),
+                    "error": timeout_message,
+                    "stdout_chars": len(stdout),
+                    "stderr_chars": len(stderr),
+                }
+            )
+            atomic_write_text(job_dir / f"attempt-{attempt_number}.stdout", stdout)
+            atomic_write_text(job_dir / f"attempt-{attempt_number}.stderr", stderr)
+            latest_meta = load_meta(job_dir)
+            latest_meta["attempt_details"] = attempts
+            save_meta(job_dir, latest_meta)
+            return subprocess.CompletedProcess(attempt_cmd, 124, stdout, stderr), attempts, None
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        transport_error = retryable_transport_error(stdout, stderr) if proc.returncode != 0 else None
+        retryable = transport_error is not None and meta.get("mode") in TRANSPORT_RETRY_MODES
+        backoff = min(2 ** attempt_number, 10)
+        will_retry = retryable and attempt_number <= retry_limit and deadline - time.monotonic() > backoff + 1
+        attempts.append(
+            {
+                "attempt": attempt_number,
+                "returncode": proc.returncode,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "retryable_transport_error": retryable,
+                "will_retry": will_retry,
+                "timed_out": False,
+                "started": True,
+                "strategy": "initial" if attempt_number == 1 else "resume-finalize",
+                "session_id": meta.get("transport_retry_session_id"),
+                "error": transport_error,
+                "stdout_chars": len(stdout),
+                "stderr_chars": len(stderr),
+            }
+        )
+        atomic_write_text(job_dir / f"attempt-{attempt_number}.stdout", stdout)
+        atomic_write_text(job_dir / f"attempt-{attempt_number}.stderr", stderr)
+        latest_meta = load_meta(job_dir)
+        latest_meta["attempt_details"] = attempts
+        save_meta(job_dir, latest_meta)
+
+        final_transport_error = transport_error
+        if retryable and attempt_number <= retry_limit and not will_retry:
+            skipped_attempt = attempt_number + 1
+            recoveries_not_started = retry_limit - attempt_number + 1
+            timeout_message = "Recovery not started because the shared job deadline had insufficient remaining time"
+            attempts.append(
+                {
+                    "attempt": skipped_attempt,
+                    "returncode": 124,
+                    "elapsed_seconds": 0.0,
+                    "retryable_transport_error": False,
+                    "will_retry": False,
+                    "timed_out": True,
+                    "started": False,
+                    "strategy": "resume-finalize",
+                    "session_id": meta.get("transport_retry_session_id"),
+                    "error": timeout_message,
+                    "stdout_chars": 0,
+                    "stderr_chars": len(timeout_message) + 1,
+                }
+            )
+            atomic_write_text(job_dir / f"attempt-{skipped_attempt}.stdout", "")
+            atomic_write_text(job_dir / f"attempt-{skipped_attempt}.stderr", timeout_message + "\n")
+            latest_meta = load_meta(job_dir)
+            latest_meta["attempt_details"] = attempts
+            latest_meta["recoveries_not_started"] = recoveries_not_started
+            save_meta(job_dir, latest_meta)
+        if not will_retry:
+            return proc, attempts, final_transport_error
+
+        time.sleep(backoff)
+
+    raise AssertionError("transport retry loop exited unexpectedly")
+
+
 def run_job(job_dir: Path) -> int:
     meta = load_meta(job_dir)
     if meta.get("status") == "cancel_requested":
@@ -805,23 +976,16 @@ def run_job(job_dir: Path) -> int:
         cmd = grok_command(meta)
         meta["command"] = cmd
         save_meta(job_dir, meta)
-        proc = subprocess.run(
-            cmd,
-            cwd=meta.get("cwd") or None,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            capture_output=True,
-            timeout=int(meta.get("timeout") or DEFAULT_TIMEOUT),
-        )
+        proc, attempt_details, transport_error = run_grok_with_transport_retries(meta, cmd, job_dir)
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
         (job_dir / "raw.stdout").write_text(stdout, encoding="utf-8")
         (job_dir / "raw.stderr").write_text(stderr, encoding="utf-8")
         text, parsed = extract_text(stdout)
-        session_id = extract_session_id(parsed)
+        session_id = extract_session_id(parsed) or meta.get("transport_retry_session_id")
         review = extract_review(parsed) if meta.get("mode") in {"review", "adversarial-review"} else None
         contract_error = None
-        if meta.get("mode") in {"review", "adversarial-review"}:
+        if meta.get("mode") in {"review", "adversarial-review"} and proc.returncode == 0:
             if review is None:
                 contract_error = "Grok review output did not match the required structured review contract"
             else:
@@ -830,11 +994,14 @@ def run_job(job_dir: Path) -> int:
         latest_meta = load_meta(job_dir)
         if latest_meta.get("status") in {"cancel_requested", "cancelled"}:
             status = "cancelled"
-        elif proc.returncode == 0 and contract_error is None:
+        elif proc.returncode == 124:
+            status = "timeout"
+        elif proc.returncode == 0 and contract_error is None and transport_error is None:
             status = "complete"
         else:
             status = "failed"
-        effective_returncode = proc.returncode if proc.returncode != 0 else (2 if contract_error else 0)
+        effective_returncode = proc.returncode if proc.returncode != 0 else (1 if transport_error else 2 if contract_error else 0)
+        error_kind = "timeout" if proc.returncode == 124 else "transport" if transport_error else "contract" if contract_error else None
         result_json = {
             "job_id": meta["job_id"],
             "status": status,
@@ -845,6 +1012,10 @@ def run_job(job_dir: Path) -> int:
             "session_id": session_id,
             "review": review,
             "contract_error": contract_error,
+            "error_kind": error_kind,
+            "retryable": False if error_kind in {"transport", "timeout"} else None,
+            "recoveries_not_started": latest_meta.get("recoveries_not_started", 0),
+            "attempt_details": attempt_details,
             "stderr_tail": stderr[-4000:],
         }
         atomic_write_text(job_dir / "result.json", json.dumps(result_json, ensure_ascii=False, indent=2) + "\n")
@@ -854,8 +1025,8 @@ def run_job(job_dir: Path) -> int:
         latest_meta["finished_at"] = utc_now()
         if session_id:
             latest_meta["result_session_id"] = session_id
-        if contract_error:
-            latest_meta["error"] = contract_error
+        if proc.returncode == 124 or transport_error or contract_error:
+            latest_meta["error"] = (stderr.strip().splitlines()[-1] if proc.returncode == 124 else None) or transport_error or contract_error
         latest_meta.pop("pid", None)
         save_meta(job_dir, latest_meta)
         return effective_returncode
@@ -864,16 +1035,12 @@ def run_job(job_dir: Path) -> int:
     except FileNotFoundError:
         return finalize_runtime_failure(job_dir, meta, f"grok binary not found: {meta.get('grok_bin') or 'grok'}", 127)
     except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode(errors="replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode(errors="replace")
+        stdout = subprocess_text(exc.stdout)
+        stderr = subprocess_text(exc.stderr)
         (job_dir / "raw.stdout").write_text(stdout, encoding="utf-8")
         (job_dir / "raw.stderr").write_text(stderr + f"\nTimed out after {meta.get('timeout')}s\n", encoding="utf-8")
         text, parsed = extract_text(stdout)
-        session_id = extract_session_id(parsed)
+        session_id = extract_session_id(parsed) or meta.get("transport_retry_session_id")
         atomic_write_text(job_dir / "result.md", text.strip() + ("\n" if text.strip() else ""))
         latest_meta = load_meta(job_dir)
         status = "cancelled" if latest_meta.get("status") in {"cancel_requested", "cancelled"} else "timeout"
@@ -894,6 +1061,9 @@ def run_job(job_dir: Path) -> int:
                     "text": text,
                     "parsed": parsed,
                     "session_id": session_id,
+                    "error_kind": "timeout",
+                    "retryable": False,
+                    "attempt_details": latest_meta.get("attempt_details", []),
                     "stderr_tail": stderr[-4000:],
                 },
                 ensure_ascii=False,
@@ -1245,6 +1415,8 @@ def resolve_resume_session(jobs_dir: Path, job_id: str | None, session_id: str |
         if not candidate:
             result = load_result_payload(job_dir)
             candidate = result.get("session_id") if result else None
+        if not candidate:
+            candidate = meta.get("transport_retry_session_id")
         if isinstance(candidate, str) and candidate:
             return candidate
     target = job_id or "recent Grok Companion jobs"
@@ -1524,6 +1696,12 @@ def add_runtime_flags(parser: argparse.ArgumentParser) -> None:
     check_group.add_argument("--no-check", dest="check", action="store_false", help="Force Grok self-verification off")
     parser.set_defaults(check=None)
     parser.add_argument("--best-of-n", type=int, help="Use Grok best-of-N for the primary run")
+    parser.add_argument(
+        "--transport-retries",
+        type=int,
+        choices=range(0, 6),
+        help="Retry read-only structured reviews after retryable transport failures (default: 2 for review modes, 0 otherwise)",
+    )
     parser.add_argument("--session-id", help="Resume an existing Grok session id")
     parser.add_argument("--background", action="store_true", help="Start job and return immediately")
     parser.add_argument("--wait", action="store_true", help="Run foreground; kept for compatibility and readability")

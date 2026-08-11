@@ -170,6 +170,7 @@ class McpServerTests(unittest.TestCase):
                 review_tool = next(tool for tool in response["result"]["tools"] if tool["name"] == "grok_review")
                 properties = review_tool["inputSchema"]["properties"]
                 self.assertEqual(properties["profile"]["enum"], ["full", "quick"])
+                self.assertEqual(properties["transport_retries"]["maximum"], 5)
                 self.assertNotIn("default", properties["check"])
             finally:
                 client.close()
@@ -391,6 +392,7 @@ class McpServerTests(unittest.TestCase):
                             "task": "quick without check",
                             "profile": "quick",
                             "check": False,
+                            "transport_retries": 4,
                         },
                     },
                 )["result"]["structuredContent"]
@@ -405,6 +407,7 @@ class McpServerTests(unittest.TestCase):
                 meta = json.loads((jobs / launch["job_id"] / "meta.json").read_text(encoding="utf-8"))
                 raw = json.loads((jobs / launch["job_id"] / "raw.stdout").read_text(encoding="utf-8"))
                 self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["check"]), ("quick", None, 900, False))
+                self.assertEqual(meta["transport_retries"], 4)
                 self.assertNotIn("--max-turns", raw["argv"])
                 self.assertNotIn("--check", raw["argv"])
             finally:

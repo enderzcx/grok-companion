@@ -4,6 +4,7 @@ All notable changes to Grok Companion are documented here.
 
 ## Unreleased
 
+- Recover explicit Grok `reqwest` streaming transport failures for read-only structured reviews by resuming a stable session for a tool-free finalization within the existing job timeout, preserve per-attempt artifacts, and stop misclassifying transport failures as review schema contract failures.
 - Recover Grok connectivity in macOS GUI/MCP hosts that do not inherit shell proxy variables by falling back to the active system HTTP/HTTPS proxy; explicit proxy environment variables still take precedence.
 
 ## 0.4.5 - 2026-08-07

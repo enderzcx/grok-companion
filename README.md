@@ -114,7 +114,9 @@ Codex 调用 grok_review / grok_research / grok_continue / ...
 
 `profile=quick` 是显式轻量模式：普通任务使用 `max_turns=16`、`effort=high`、job runtime `timeout=900` 秒，并且不自动开启自检。它适合连通性 smoke、固定短答案或用户明确要求的快速调用。结构化 `review` 和 `adversarial-review` 是例外：即使选择 quick，也不会继承 quick 的 turn cap，只有显式传入 `max_turns` 才会限制轮次。
 
-显式 `max_turns`、`timeout`、`context_limit`、`check` 会覆盖 profile；结构化审查的 turn cap 只接受显式 `max_turns`。CLI 同时支持 `--check` 和 `--no-check`；MCP 的 `check: true|false` 也是显式覆盖。Grok CLI 当前不允许 `--check` 与 `--json-schema` 同时使用，因此结构化 review 在 prompt 内执行 schema-safe 自检，research 使用原生 `--check`。job metadata 的 `check_strategy` 会记录 `prompt`、`native` 或 `off`。
+只读 `review` / `adversarial-review` 遇到明确的 `reqwest` 流式传输错误时，默认在同一 job 的总 `timeout` 预算内恢复 2 次。首次审查预先绑定 session；重试通过 `--resume` 复用已有分析、禁用工具并只收结构化最终结果，避免再次完整审查。每次 attempt（包括恢复阶段超时）都保存 stdout/stderr 与 metadata；预绑定 session 也可供失败后的 `continue` 使用。其他模式默认不自动重试，避免可写或外部副作用被重复执行。最终 transport failure 会保留为主错误，不再被误报成 review schema contract failure；内部恢复预算耗尽后顶层 `retryable=false`，避免宿主再次整单重跑。
+
+显式 `max_turns`、`timeout`、`context_limit`、`transport_retries`、`check` 会覆盖 profile；结构化审查的 turn cap 只接受显式 `max_turns`。CLI 同时支持 `--check` 和 `--no-check`；MCP 的 `check: true|false` 也是显式覆盖。Grok CLI 当前不允许 `--check` 与 `--json-schema` 同时使用，因此结构化 review 在 prompt 内执行 schema-safe 自检，research 使用原生 `--check`。job metadata 的 `check_strategy` 会记录 `prompt`、`native` 或 `off`。
 
 这里启动工具的 `timeout` 是整个 Grok job 的运行预算，`grok_wait` 的 `timeout` 只是单次观察窗口（默认 180 秒，MCP 最长 600 秒），不会停止后台 job。
 

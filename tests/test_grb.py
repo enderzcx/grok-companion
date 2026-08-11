@@ -55,6 +55,22 @@ def make_fake_grok(tmp: Path) -> Path:
                 print(f"{session}  2026-07-12  2026-07-12  local  Fake session")
                 raise SystemExit(0)
 
+            argv_log = os.environ.get("GROK_FAKE_ARGV_LOG")
+            if argv_log:
+                with Path(argv_log).open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(sys.argv[1:]) + "\\n")
+
+            transport_counter = os.environ.get("GROK_FAKE_TRANSPORT_COUNTER")
+            if transport_counter:
+                counter_path = Path(transport_counter)
+                count = int(counter_path.read_text(encoding="utf-8")) if counter_path.exists() else 0
+                counter_path.write_text(str(count + 1), encoding="utf-8")
+                if count < int(os.environ.get("GROK_FAKE_TRANSPORT_FAILURES", "1")):
+                    message = 'Internal error: "reqwest error stream: error sending request for url (https://cli-chat-proxy.grok.com/v1/responses)"'
+                    print(json.dumps({"type": "error", "message": message}))
+                    print(f"Error: {message}", file=sys.stderr)
+                    raise SystemExit(1)
+
             if os.environ.get("GROK_FAKE_SLEEP"):
                 time.sleep(float(os.environ["GROK_FAKE_SLEEP"]))
 
@@ -403,6 +419,216 @@ class GrbTests(unittest.TestCase):
             self.assertEqual(result["grok_returncode"], 0)
             self.assertIn("structured review contract", result["contract_error"])
             self.assertIn("nope", (job / "raw.stdout").read_text(encoding="utf-8"))
+
+    def test_review_retries_retryable_transport_failure_within_same_job(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            counter = tmp / "transport-count"
+            argv_log = tmp / "argv.jsonl"
+            proc = self.run_grb(
+                tmp,
+                "review",
+                "--jobs-dir",
+                str(jobs),
+                "retry transport",
+                extra_env={
+                    "GROK_FAKE_TRANSPORT_COUNTER": str(counter),
+                    "GROK_FAKE_TRANSPORT_FAILURES": "1",
+                    "GROK_FAKE_ARGV_LOG": str(argv_log),
+                },
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            job = next(jobs.iterdir())
+            result = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual(result["review"]["verdict"], "approve")
+            self.assertEqual(len(result["attempt_details"]), 2)
+            self.assertTrue(result["attempt_details"][0]["retryable_transport_error"])
+            self.assertTrue(result["attempt_details"][0]["will_retry"])
+            self.assertFalse(result["attempt_details"][1]["retryable_transport_error"])
+            self.assertFalse(result["attempt_details"][1]["will_retry"])
+            self.assertEqual(meta["transport_retries"], 2)
+            self.assertEqual(meta["transport_retry_strategy"], "resume-finalize")
+            retry_session = meta["transport_retry_session_id"]
+            self.assertRegex(retry_session, r"^[0-9a-f-]{36}$")
+            first_argv, retry_argv = [json.loads(line) for line in argv_log.read_text(encoding="utf-8").splitlines()]
+            self.assertIn("--session-id", first_argv)
+            self.assertEqual(first_argv[first_argv.index("--session-id") + 1], retry_session)
+            self.assertEqual(retry_argv, result["parsed"]["argv"])
+            self.assertIn("--resume", result["parsed"]["argv"])
+            self.assertEqual(result["parsed"]["argv"][result["parsed"]["argv"].index("--resume") + 1], retry_session)
+            self.assertEqual(result["parsed"]["argv"][result["parsed"]["argv"].index("--tools") + 1], "")
+            self.assertIn("transport-retry-prompt.md", result["parsed"]["argv"][result["parsed"]["argv"].index("--prompt-file") + 1])
+            self.assertEqual(result["attempt_details"][1]["strategy"], "resume-finalize")
+            self.assertTrue((job / "attempt-1.stderr").exists())
+            self.assertTrue((job / "attempt-2.stdout").exists())
+
+    def test_exhausted_review_transport_retries_preserve_primary_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            counter = tmp / "transport-count"
+            proc = self.run_grb(
+                tmp,
+                "review",
+                "--transport-retries",
+                "1",
+                "--jobs-dir",
+                str(jobs),
+                "exhaust transport retry",
+                extra_env={
+                    "GROK_FAKE_TRANSPORT_COUNTER": str(counter),
+                    "GROK_FAKE_TRANSPORT_FAILURES": "5",
+                },
+            )
+            self.assertEqual(proc.returncode, 1)
+            job = next(jobs.iterdir())
+            result = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["error_kind"], "transport")
+            self.assertFalse(result["retryable"])
+            self.assertIsNone(result["contract_error"])
+            self.assertEqual(len(result["attempt_details"]), 2)
+            self.assertFalse(result["attempt_details"][-1]["will_retry"])
+            self.assertIn("reqwest error stream", meta["error"])
+            self.assertEqual(result["session_id"], meta["transport_retry_session_id"])
+            self.assertEqual(meta["result_session_id"], meta["transport_retry_session_id"])
+
+            continued = self.run_grb(
+                tmp,
+                "continue",
+                "--jobs-dir",
+                str(jobs),
+                "--job-id",
+                job.name,
+                "finish after operator follow-up",
+            )
+            self.assertEqual(continued.returncode, 0, continued.stderr)
+            continued_job = sorted(jobs.iterdir())[-1]
+            continued_raw = json.loads((continued_job / "raw.stdout").read_text(encoding="utf-8"))
+            self.assertEqual(
+                continued_raw["argv"][continued_raw["argv"].index("--resume") + 1],
+                meta["transport_retry_session_id"],
+            )
+
+    def test_resume_finalize_timeout_preserves_attempt_evidence(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            counter = tmp / "transport-count"
+            proc = self.run_grb(
+                tmp,
+                "review",
+                "--transport-retries",
+                "1",
+                "--timeout",
+                "4",
+                "--jobs-dir",
+                str(jobs),
+                "timeout during finalization",
+                extra_env={
+                    "GROK_FAKE_TRANSPORT_COUNTER": str(counter),
+                    "GROK_FAKE_TRANSPORT_FAILURES": "1",
+                    "GROK_FAKE_SLEEP": "10",
+                },
+            )
+            self.assertEqual(proc.returncode, 124)
+            job = next(jobs.iterdir())
+            result = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "timeout")
+            self.assertEqual(result["error_kind"], "timeout")
+            self.assertFalse(result["retryable"])
+            self.assertEqual(len(result["attempt_details"]), 2)
+            self.assertTrue(result["attempt_details"][1]["timed_out"])
+            self.assertEqual(result["attempt_details"][1]["strategy"], "resume-finalize")
+            self.assertEqual(result["session_id"], meta["transport_retry_session_id"])
+            self.assertTrue((job / "attempt-2.stdout").exists())
+            self.assertIn("job deadline", (job / "attempt-2.stderr").read_text(encoding="utf-8"))
+
+    def test_post_transport_invalid_review_is_contract_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            counter = tmp / "transport-count"
+            proc = self.run_grb(
+                tmp,
+                "review",
+                "--transport-retries",
+                "1",
+                "--jobs-dir",
+                str(jobs),
+                "invalid recovery payload",
+                extra_env={
+                    "GROK_FAKE_TRANSPORT_COUNTER": str(counter),
+                    "GROK_FAKE_TRANSPORT_FAILURES": "1",
+                    "GROK_FAKE_REVIEW_MODE": "invalid",
+                },
+            )
+            self.assertEqual(proc.returncode, 2)
+            result = json.loads((next(jobs.iterdir()) / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["error_kind"], "contract")
+            self.assertIn("structured review contract", result["contract_error"])
+            self.assertIsNone(result["retryable"])
+            self.assertIn("reqwest error stream", result["attempt_details"][0]["error"])
+
+    def test_insufficient_deadline_records_unstarted_recovery(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            counter = tmp / "transport-count"
+            proc = self.run_grb(
+                tmp,
+                "review",
+                "--transport-retries",
+                "1",
+                "--timeout",
+                "2",
+                "--jobs-dir",
+                str(jobs),
+                "no recovery budget",
+                extra_env={
+                    "GROK_FAKE_TRANSPORT_COUNTER": str(counter),
+                    "GROK_FAKE_TRANSPORT_FAILURES": "1",
+                },
+            )
+            self.assertEqual(proc.returncode, 1)
+            result = json.loads((next(jobs.iterdir()) / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["error_kind"], "transport")
+            self.assertEqual(len(result["attempt_details"]), 2)
+            skipped = result["attempt_details"][1]
+            self.assertFalse(skipped["started"])
+            self.assertTrue(skipped["timed_out"])
+            self.assertEqual(skipped["strategy"], "resume-finalize")
+            self.assertIn("insufficient remaining time", skipped["error"])
+            self.assertEqual(result["recoveries_not_started"], 1)
+
+    def test_non_review_transport_failure_is_not_retried_by_default(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            counter = tmp / "transport-count"
+            proc = self.run_grb(
+                tmp,
+                "ask",
+                "--transport-retries",
+                "2",
+                "--jobs-dir",
+                str(jobs),
+                "do not retry ask",
+                extra_env={
+                    "GROK_FAKE_TRANSPORT_COUNTER": str(counter),
+                    "GROK_FAKE_TRANSPORT_FAILURES": "1",
+                },
+            )
+            self.assertEqual(proc.returncode, 1)
+            job = next(jobs.iterdir())
+            result = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["transport_retries"], 0)
+            self.assertEqual(len(result["attempt_details"]), 1)
 
     def test_missing_review_schema_becomes_durable_failure(self):
         with tempfile.TemporaryDirectory() as td:

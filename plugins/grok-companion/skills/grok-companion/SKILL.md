@@ -33,13 +33,14 @@ Treat this plugin like a full Grok collaborator bridge (same product idea as `op
 3. Give Grok the complete task and all relevant constraints in one launch. Prefer `profile=full` (default): no plugin-imposed turn cap, effort `high`, job runtime `7200` seconds, and embedded git/diff budget `context_limit` default `256000` characters. Review, adversarial review, and research also self-check under full.
 4. Use `profile=quick` only for connectivity smoke, a deliberately small fixed-answer task, or an explicit user request. Ordinary quick tasks resolve to 16 turns, effort `high`, and 900 seconds. Structured `review` / `adversarial-review` stay uncapped unless the caller explicitly supplies `max_turns`.
 5. Do not add `max_turns` merely to fit the current host wait window. Do not pass `effort=xhigh` or `max` on the current default `grok-4.5` model: live CLI rejects them with `use one of: high, medium, low`. Prefer tool-read over megabyte-scale `context_limit` when the diff is huge.
-6. Launch tools return a background `job_id`.
-7. Call `grok_wait` with a bounded observation window (default 180s). If it returns `completed: false`, it also returns `job_ok: null` and `next_action: wait_same_job`; call it again with the same `job_id`. Avoid tight `grok_status` polling.
-8. When the user wants to see Grok working, call `grok_monitor` with the job and an absolute `.html` path in the current Codex visualization directory, then present that file as an inline visualization. Refreshing renders a new snapshot; it is not a live token stream.
-9. Follow [references/result-handling.md](references/result-handling.md) when presenting or accepting results.
-10. Use the bundled `scripts/grb.py` CLI only when MCP is unavailable or foreground execution is specifically required.
+6. Read-only `review` / `adversarial-review` recover from explicit `reqwest` streaming transport failures twice by default inside the original job timeout. The first attempt owns a stable session; recovery resumes it with tools disabled and requests only the final structured result instead of re-running the review. Other modes default to no automatic transport retry so writes or external effects are never duplicated. Use explicit `transport_retries` only when that boundary is intentional.
+7. Launch tools return a background `job_id`.
+8. Call `grok_wait` with a bounded observation window (default 180s). If it returns `completed: false`, it also returns `job_ok: null` and `next_action: wait_same_job`; call it again with the same `job_id`. Avoid tight `grok_status` polling.
+9. When the user wants to see Grok working, call `grok_monitor` with the job and an absolute `.html` path in the current Codex visualization directory, then present that file as an inline visualization. Refreshing renders a new snapshot; it is not a live token stream.
+10. Follow [references/result-handling.md](references/result-handling.md) when presenting or accepting results.
+11. Use the bundled `scripts/grb.py` CLI only when MCP is unavailable or foreground execution is specifically required.
 
-Explicit `max_turns`, job `timeout`, `context_limit`, and `check` values override the selected profile. The launch `timeout` is Grok's total job runtime; the `grok_wait` timeout is only one observation window and never cancels the job.
+Explicit `max_turns`, job `timeout`, `context_limit`, `transport_retries`, and `check` values override the selected profile. The launch `timeout` is Grok's total job runtime across retries; the `grok_wait` timeout is only one observation window and never cancels the job.
 
 Do not invent tools that are not visible in the current session.
 
