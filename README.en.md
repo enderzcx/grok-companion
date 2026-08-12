@@ -4,7 +4,7 @@
 
 Use the local **Grok CLI** as a full external collaborator inside **Codex**.
 
-Grok Companion v0.4.5 is a Codex plugin with 14 native MCP tools, plus an [Agent Plugins](https://agent-plugins.org/) 1.0.0 portable package surface. It covers consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
+Grok Companion v0.4.6 is a Codex plugin with 14 native MCP tools, plus an [Agent Plugins](https://agent-plugins.org/) 1.0.0 portable package surface. It covers consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
 
 > **This is not a Codex sidebar terminal.**
 >
@@ -106,9 +106,9 @@ It is a refreshable status snapshot, not a pretend live token stream. The curren
 
 When a macOS GUI/MCP host does not inherit shell proxy variables, Grok Companion falls back to the currently enabled system HTTP/HTTPS proxy for Grok child processes. Explicit `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` values always take precedence; the plugin does not hard-code a machine-specific proxy address.
 
-Formal Grok collaboration defaults to `profile=full`: the plugin does not pass `--max-turns`, effort defaults to `high`, the job runtime is 7200 seconds, and structured/git context defaults to `context_limit=256000` characters. `review`, `adversarial-review`, and `research` also enable Grok self-check under full. The goal is a complete Grok collaborator bridge (same product stance as `openai/codex-plugin-cc` for Codex), not a starved one-shot helper.
+Formal Grok collaboration defaults to `profile=full`: model `grok-4.6`, the plugin does not pass `--max-turns`, effort defaults to `xhigh`, the job runtime is 7200 seconds, and structured/git context defaults to `context_limit=256000` characters. `review`, `adversarial-review`, and `research` also enable Grok self-check under full. Pass `--effort high` (or lower) when you want a cheaper/faster turn. The goal is a complete Grok collaborator bridge (same product stance as `openai/codex-plugin-cc` for Codex), not a starved one-shot helper.
 
-> Live check (Grok CLI 0.2.118 + default `grok-4.5`): `--effort` accepts only `high|medium|low`. `xhigh` / `max` fail with `unknown effort level ... use one of: high, medium, low`. `context_limit` is the companion embedded-packet budget, not the model context window; do not default to 1M characters.
+> Live check (Grok CLI 1.0.3 + default `grok-4.6`): `--effort` accepts `high|medium|low|xhigh`. `grok-4.5` still accepts only `high|medium|low`; the runtime clamps `xhigh` / `max` to `high` on that model (`use one of: high, medium, low`). `context_limit` is the companion embedded-packet budget, not the model context window; do not default to 1M characters.
 
 When the embedded packet is truncated, the prompt tells Grok to tool-read the rest of the repo.
 

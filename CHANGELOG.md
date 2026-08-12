@@ -4,6 +4,12 @@ All notable changes to Grok Companion are documented here.
 
 ## Unreleased
 
+## 0.4.6 - 2026-08-13
+
+- Default launch model is `grok-4.6`. Product default effort on 4.6 is `xhigh`.
+- Clamp `xhigh` / `max` to `high` only when the selected model is still 3-tier (`grok-4.5` and older), so 4.6 jobs can use Extra High without a launch failure.
+- Document that cheaper/faster turns should pass `effort=high` (or lower) on 4.6.
+
 - Recover explicit Grok `reqwest` streaming transport failures for read-only structured reviews by resuming a stable session for a tool-free finalization within the existing job timeout, preserve per-attempt artifacts, and stop misclassifying transport failures as review schema contract failures.
 - Recover Grok connectivity in macOS GUI/MCP hosts that do not inherit shell proxy variables by falling back to the active system HTTP/HTTPS proxy; explicit proxy environment variables still take precedence.
 

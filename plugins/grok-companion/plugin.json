@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "grok-companion",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Use the local Grok CLI as a complete external collaborator: consult, review, research, delegate, and manage jobs through skills and MCP tools.",
   "author": {
     "name": "Ender",

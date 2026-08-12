@@ -292,10 +292,10 @@ class GrbTests(unittest.TestCase):
                 self.assertEqual(meta["profile"], "full")
                 self.assertIsNone(meta["max_turns"])
                 self.assertEqual(meta["timeout"], 7200)
-                self.assertEqual(meta["effort"], "high")
+                self.assertEqual(meta["effort"], "xhigh")
                 self.assertEqual(meta["check"], expected_check)
                 self.assertNotIn("--max-turns", raw["argv"])
-                self.assertEqual(raw["argv"][raw["argv"].index("--effort") + 1], "high")
+                self.assertEqual(raw["argv"][raw["argv"].index("--effort") + 1], "xhigh")
                 expected_strategy = "prompt" if mode in {"review", "adversarial-review"} else "native" if expected_check else "off"
                 self.assertEqual(meta["check_strategy"], expected_strategy)
                 self.assertEqual("--check" in raw["argv"], mode == "research")
@@ -311,7 +311,7 @@ class GrbTests(unittest.TestCase):
             quick_job = next(quick_jobs.iterdir())
             quick_meta = json.loads((quick_job / "meta.json").read_text(encoding="utf-8"))
             quick_raw = json.loads((quick_job / "raw.stdout").read_text(encoding="utf-8"))
-            self.assertEqual((quick_meta["max_turns"], quick_meta["timeout"], quick_meta["effort"], quick_meta["check"]), (16, 900, "high", False))
+            self.assertEqual((quick_meta["max_turns"], quick_meta["timeout"], quick_meta["effort"], quick_meta["check"]), (16, 900, "xhigh", False))
             self.assertNotIn("--check", quick_raw["argv"])
 
             override_jobs = tmp / "override-jobs"
@@ -348,6 +348,39 @@ class GrbTests(unittest.TestCase):
             no_check_raw = json.loads((no_check_job / "raw.stdout").read_text(encoding="utf-8"))
             self.assertFalse(no_check_meta["check"])
             self.assertNotIn("--check", no_check_raw["argv"])
+
+    def test_default_model_is_grok_46_and_xhigh_stays_on_46(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs-46"
+            proc = self.run_grb(
+                tmp, "ask", "--effort", "xhigh", "--jobs-dir", str(jobs), "xhigh on 4.6"
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            job = next(jobs.iterdir())
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            raw = json.loads((job / "raw.stdout").read_text(encoding="utf-8"))
+            self.assertEqual(meta["model"], "grok-4.6")
+            self.assertEqual(meta["effort"], "xhigh")
+            self.assertEqual(raw["argv"][raw["argv"].index("--model") + 1], "grok-4.6")
+            self.assertEqual(raw["argv"][raw["argv"].index("--effort") + 1], "xhigh")
+
+            clamp_jobs = tmp / "jobs-45"
+            clamped = self.run_grb(
+                tmp,
+                "ask",
+                "--model",
+                "grok-4.5",
+                "--effort",
+                "xhigh",
+                "--jobs-dir",
+                str(clamp_jobs),
+                "xhigh on 4.5 clamps",
+            )
+            self.assertEqual(clamped.returncode, 0, clamped.stderr)
+            clamp_meta = json.loads((next(clamp_jobs.iterdir()) / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(clamp_meta["model"], "grok-4.5")
+            self.assertEqual(clamp_meta["effort"], "high")
 
     def test_review_includes_git_context(self):
         with tempfile.TemporaryDirectory() as td:
@@ -812,7 +845,7 @@ class GrbTests(unittest.TestCase):
             meta = json.loads((latest / "meta.json").read_text(encoding="utf-8"))
             self.assertIn("--resume", raw["argv"])
             self.assertIn("11111111-1111-4111-8111-111111111111", raw["argv"])
-            self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["effort"], meta["check"]), ("full", None, 7200, "high", False))
+            self.assertEqual((meta["profile"], meta["max_turns"], meta["timeout"], meta["effort"], meta["check"]), ("full", None, 7200, "xhigh", False))
             self.assertNotIn("--max-turns", raw["argv"])
 
             sessions = self.run_grb(tmp, "sessions", "--json")

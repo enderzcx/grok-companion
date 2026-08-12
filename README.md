@@ -4,7 +4,7 @@
 
 让 **Codex** 把本机 **Grok CLI** 当作完整的外部协作者使用。
 
-Grok Companion v0.4.5 是一个带 14 个原生 MCP 工具的 Codex plugin，同时提供 [Agent Plugins](https://agent-plugins.org/) 1.0.0 可移植包装。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
+Grok Companion v0.4.6 是一个带 14 个原生 MCP 工具的 Codex plugin，同时提供 [Agent Plugins](https://agent-plugins.org/) 1.0.0 可移植包装。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
 
 > **这不是 Codex 侧边栏终端。**
 >
@@ -106,9 +106,9 @@ Codex 调用 grok_review / grok_research / grok_continue / ...
 
 在 macOS GUI / MCP 宿主没有继承 shell 代理变量时，Grok Companion 会读取当前启用的系统 HTTP/HTTPS 代理并仅用于 Grok 子进程。显式的 `HTTP_PROXY`、`HTTPS_PROXY` 或 `ALL_PROXY` 始终优先；插件不会硬编码某台机器的代理地址。
 
-正式 Grok 协作默认使用 `profile=full`：插件不主动传 `--max-turns`，`effort=high`，job runtime `timeout=7200` 秒，结构化/git context 默认 `context_limit=256000` 字符。`review`、`adversarial-review` 和 `research` 在 full 下默认开启 Grok 自检。设计目标是让 Grok 作为**完整协作者**工作（类似 `openai/codex-plugin-cc` 对 Codex 的态度），而不是被宿主 turn 预算饿死。
+正式 Grok 协作默认使用 `profile=full`：模型 `grok-4.6`，插件不主动传 `--max-turns`，`effort=xhigh`，job runtime `timeout=7200` 秒，结构化/git context 默认 `context_limit=256000` 字符。`review`、`adversarial-review` 和 `research` 在 full 下默认开启 Grok 自检。要更快/更省可显式传 `--effort high`。设计目标是让 Grok 作为**完整协作者**工作（类似 `openai/codex-plugin-cc` 对 Codex 的态度），而不是被宿主 turn 预算饿死。
 
-> 实测（Grok CLI 0.2.118 + 默认 `grok-4.5`）：`--effort` 只接受 `high|medium|low`。`xhigh` / `max` 会直接失败：`unknown effort level ... use one of: high, medium, low`。`context_limit` 是 companion 塞进 prompt 的字符预算，不是模型上下文窗口；不要默认塞 1M。
+> 实测（Grok CLI 1.0.3 + 默认 `grok-4.6`）：`--effort` 接受 `high|medium|low|xhigh`。`grok-4.5` 仍只接受 `high|medium|low`；对 4.5 传 `xhigh` / `max` 会被 runtime 钳到 `high`（否则 CLI 报 `use one of: high, medium, low`）。`context_limit` 是 companion 塞进 prompt 的字符预算，不是模型上下文窗口；不要默认塞 1M。
 
 若 embedded diff 被截断，prompt 会明确要求 Grok 用工具继续读仓。
 

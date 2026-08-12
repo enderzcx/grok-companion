@@ -23,17 +23,17 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.4.5"
+VERSION = "0.4.6"
 DEFAULT_PROFILE = "full"
+DEFAULT_MODEL = "grok-4.6"
 # full = complete Grok collaborator budget (no artificial turn starve, high reasoning, long runtime).
 # quick = connectivity / deliberately short tasks only.
 #
-# Effort defaults are pinned to levels accepted by the current default model (grok-4.5):
-# live CLI 0.2.118 accepts only high|medium|low for that model. Canonical CLI docs also list
-# xhigh/max, but those fail at launch when the active model menu does not advertise them.
+# Default model is grok-4.6 (CLI 1.0.3+). Product default effort on 4.6 is xhigh.
+# grok-4.5 still rejects xhigh/max and is clamped to high.
 PROFILE_DEFAULTS = {
-    "full": {"max_turns": None, "timeout": 7200, "effort": "high"},
-    "quick": {"max_turns": 16, "timeout": 900, "effort": "high"},
+    "full": {"max_turns": None, "timeout": 7200, "effort": "xhigh"},
+    "quick": {"max_turns": 16, "timeout": 900, "effort": "xhigh"},
 }
 AUTO_CHECK_MODES = {"review", "adversarial-review", "research"}
 # All full-profile modes leave max_turns unset unless the caller overrides; structured
@@ -548,16 +548,40 @@ def save_meta(job_dir: Path, meta: dict[str, Any]) -> None:
     atomic_write_text(job_dir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
 
 
+def model_supports_xhigh(model: str | None) -> bool:
+    mid = (model or DEFAULT_MODEL).strip().lower()
+    if not mid:
+        return True
+    if mid == "grok-4.6" or mid.startswith("grok-4.6"):
+        return True
+    if mid.startswith("grok-4.5") or mid in {"grok-4", "grok-3", "grok-3-mini"}:
+        return False
+    return True
+
+
+def clamp_effort_for_model(model: str | None, effort: str | None) -> str | None:
+    if effort in {"xhigh", "max"} and not model_supports_xhigh(model):
+        return "high"
+    return effort
+
+
 def resolve_runtime_profile(args: argparse.Namespace, mode: str) -> None:
     profile = getattr(args, "profile", None) or DEFAULT_PROFILE
     defaults = PROFILE_DEFAULTS[profile]
     args.profile = profile
+    if not getattr(args, "model", None):
+        args.model = DEFAULT_MODEL
     if getattr(args, "max_turns", None) is None:
         args.max_turns = None if mode in UNBOUNDED_REVIEW_MODES else defaults["max_turns"]
     if getattr(args, "timeout", None) is None:
         args.timeout = defaults["timeout"]
     if getattr(args, "effort", None) is None and getattr(args, "reasoning_effort", None) is None:
         args.effort = defaults["effort"]
+    args.effort = clamp_effort_for_model(args.model, getattr(args, "effort", None))
+    if getattr(args, "reasoning_effort", None):
+        args.reasoning_effort = clamp_effort_for_model(
+            args.model, args.reasoning_effort
+        )
     if getattr(args, "check", None) is None:
         args.check = profile == "full" and mode in AUTO_CHECK_MODES
     if getattr(args, "transport_retries", None) is None:

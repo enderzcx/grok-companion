@@ -16,7 +16,7 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.4.5"
+SERVER_VERSION = "0.4.6"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
@@ -55,7 +55,7 @@ RUNTIME_PROPERTIES: dict[str, Any] = {
     "effort": {
         "type": "string",
         "enum": ["low", "medium", "high", "xhigh", "max"],
-        "description": "Grok effort. Omission defaults to high. Live default model grok-4.5 currently accepts only low|medium|high; xhigh/max are rejected unless a model advertises them.",
+        "description": "Grok effort. Omission defaults to xhigh on grok-4.6. grok-4.5 accepts only low|medium|high; xhigh/max are clamped to high on that model.",
     },
     "reasoning_effort": {"type": "string"},
     "profile": {
@@ -514,10 +514,10 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                         "then repeat bounded grok_wait calls with the same job_id until terminal. An incomplete wait "
                         "uses job_ok=null and next_action=wait_same_job; it does not justify cancellation or restart. "
                         "Only terminal job_ok=false is a job failure. Full is the default complete-collaborator profile "
-                        "(no turn cap, effort high, 7200s runtime, 256k-char structured context); quick is opt-in smoke only. "
+                        "(no turn cap, effort xhigh, 7200s runtime, 256k-char structured context); quick is opt-in smoke only. "
                         "Read-only structured reviews retry explicit reqwest transport failures twice inside the same job timeout. "
-                        "Do not add max_turns merely to fit one host wait. Do not pass xhigh/max effort on models that "
-                        "only advertise low|medium|high. Use grok_monitor for a refreshable inline job snapshot, and "
+                        "Do not add max_turns merely to fit one host wait. Default model is grok-4.6; xhigh is valid there. "
+                        "Do not pass xhigh/max on grok-4.5 (CLI only accepts high|medium|low). Use grok_monitor for a refreshable inline job snapshot, and "
                         "grok_sessions plus grok_continue for continuity. Use superx for exact X/Twitter retrieval."
                     ),
                 },
