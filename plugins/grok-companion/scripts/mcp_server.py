@@ -16,7 +16,7 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.4.6"
+SERVER_VERSION = "0.4.7"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
@@ -92,7 +92,7 @@ RUNTIME_PROPERTIES: dict[str, Any] = {
     "disable_web_search": {"type": "boolean", "default": False},
     "check": {
         "type": "boolean",
-        "description": "Explicit self-check override. When omitted, full enables it for review, adversarial review, and research. Structured reviews use a prompt self-check because Grok CLI rejects --check with --json-schema.",
+        "description": "Explicit self-check override. When omitted, full enables it for review, adversarial review, and research. Self-check is enforced in the task prompt and does not depend on a version-specific Grok CLI flag.",
     },
     "best_of_n": {"type": "integer", "minimum": 1, "maximum": 32},
     "session_id": {"type": "string", "description": "Existing Grok session id to resume with grok --resume."},

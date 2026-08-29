@@ -55,6 +55,10 @@ def make_fake_grok(tmp: Path) -> Path:
                 print(f"{session}  2026-07-12  2026-07-12  local  Fake session")
                 raise SystemExit(0)
 
+            if "--check" in sys.argv:
+                print("error: unexpected argument '--check' found", file=sys.stderr)
+                raise SystemExit(2)
+
             argv_log = os.environ.get("GROK_FAKE_ARGV_LOG")
             if argv_log:
                 with Path(argv_log).open("a", encoding="utf-8") as handle:
@@ -296,11 +300,11 @@ class GrbTests(unittest.TestCase):
                 self.assertEqual(meta["check"], expected_check)
                 self.assertNotIn("--max-turns", raw["argv"])
                 self.assertEqual(raw["argv"][raw["argv"].index("--effort") + 1], "xhigh")
-                expected_strategy = "prompt" if mode in {"review", "adversarial-review"} else "native" if expected_check else "off"
+                expected_strategy = "prompt" if expected_check else "off"
                 self.assertEqual(meta["check_strategy"], expected_strategy)
-                self.assertEqual("--check" in raw["argv"], mode == "research")
+                self.assertNotIn("--check", raw["argv"])
                 prompt = (job / "prompt.md").read_text(encoding="utf-8")
-                self.assertEqual("Self-Check Contract" in prompt, expected_strategy == "prompt")
+                self.assertEqual("Self-Check Contract" in prompt, expected_check)
 
     def test_quick_profile_and_explicit_runtime_overrides(self):
         with tempfile.TemporaryDirectory() as td:

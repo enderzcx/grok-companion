@@ -23,7 +23,7 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.4.6"
+VERSION = "0.4.7"
 DEFAULT_PROFILE = "full"
 DEFAULT_MODEL = "grok-4.6"
 # full = complete Grok collaborator budget (no artificial turn starve, high reasoning, long runtime).
@@ -523,11 +523,15 @@ def build_prompt(mode: str, task: str, args: argparse.Namespace, git_context: di
             )
         )
 
-    if getattr(args, "check", False) and mode in {"review", "adversarial-review"}:
+    if getattr(args, "check", False):
+        if mode in {"review", "adversarial-review"}:
+            self_check = "Before emitting the final JSON object, verify every conclusion against the task, repository context, diff, and output schema. Correct unsupported findings internally. Emit no verification prose outside the schema."
+        else:
+            self_check = "Before emitting the final answer, verify material claims against the task and evidence gathered in this session. Correct unsupported claims internally, distinguish facts from inference, and return only the requested deliverable without separate verification prose."
         sections.append(
             markdown_block(
                 "Self-Check Contract",
-                "Before emitting the final JSON object, verify every conclusion against the task, repository context, diff, and output schema. Correct unsupported findings internally. Emit no verification prose outside the schema.",
+                self_check,
             )
         )
 
@@ -593,9 +597,7 @@ def resolve_runtime_profile(args: argparse.Namespace, mode: str) -> None:
 def resolved_check_strategy(mode: str, check: bool) -> str:
     if not check:
         return "off"
-    if mode in {"review", "adversarial-review"}:
-        return "prompt"
-    return "native"
+    return "prompt"
 
 
 def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: dict[str, Any] | None = None) -> tuple[str, Path, dict[str, Any]]:
@@ -690,8 +692,6 @@ def grok_command(meta: dict[str, Any], *, transport_retry: bool = False) -> list
         cmd.extend(["--disallowed-tools", meta["disallowed_tools"]])
     if meta.get("disable_web_search"):
         cmd.append("--disable-web-search")
-    if meta.get("check_strategy") == "native":
-        cmd.append("--check")
     return cmd
 
 

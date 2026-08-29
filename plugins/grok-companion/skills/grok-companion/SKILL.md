@@ -42,6 +42,8 @@ Treat this plugin like a full Grok collaborator bridge (same product idea as `op
 
 Explicit `max_turns`, job `timeout`, `context_limit`, `transport_retries`, and `check` values override the selected profile. The launch `timeout` is Grok's total job runtime across retries; the `grok_wait` timeout is only one observation window and never cancels the job.
 
+`check` is a Companion self-verification intent, not a raw Grok CLI flag. Full-profile review, adversarial review, and research inject the self-check contract into the task prompt; never add Grok's removed `--check` option to a launch command.
+
 Do not invent tools that are not visible in the current session.
 
 When version or routing drift is suspected, use the installed bounded SOP interface from this skill directory:

@@ -90,6 +90,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("use one of: high, medium, low", combined)
         self.assertIn("recover from explicit `reqwest` streaming transport failures twice", combined)
         self.assertIn("recovery resumes it with tools disabled", combined)
+        self.assertIn("not a raw Grok CLI flag", combined)
+        self.assertIn("never add Grok's removed `--check` option", combined)
         self.assertIn("same `job_id`", combined)
         self.assertIn("`job_ok: null`", combined)
         self.assertIn("wait_same_job", combined)

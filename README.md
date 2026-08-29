@@ -4,7 +4,7 @@
 
 让 **Codex** 把本机 **Grok CLI** 当作完整的外部协作者使用。
 
-Grok Companion v0.4.6 是一个带 14 个原生 MCP 工具的 Codex plugin，同时提供 [Agent Plugins](https://agent-plugins.org/) 1.0.0 可移植包装。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
+Grok Companion v0.4.7 是一个带 14 个原生 MCP 工具的 Codex plugin，同时提供 [Agent Plugins](https://agent-plugins.org/) 1.0.0 可移植包装。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
 
 > **这不是 Codex 侧边栏终端。**
 >
@@ -116,7 +116,7 @@ Codex 调用 grok_review / grok_research / grok_continue / ...
 
 只读 `review` / `adversarial-review` 遇到明确的 `reqwest` 流式传输错误时，默认在同一 job 的总 `timeout` 预算内恢复 2 次。首次审查预先绑定 session；重试通过 `--resume` 复用已有分析、禁用工具并只收结构化最终结果，避免再次完整审查。每次 attempt（包括恢复阶段超时）都保存 stdout/stderr 与 metadata；预绑定 session 也可供失败后的 `continue` 使用。其他模式默认不自动重试，避免可写或外部副作用被重复执行。最终 transport failure 会保留为主错误，不再被误报成 review schema contract failure；内部恢复预算耗尽后顶层 `retryable=false`，避免宿主再次整单重跑。
 
-显式 `max_turns`、`timeout`、`context_limit`、`transport_retries`、`check` 会覆盖 profile；结构化审查的 turn cap 只接受显式 `max_turns`。CLI 同时支持 `--check` 和 `--no-check`；MCP 的 `check: true|false` 也是显式覆盖。Grok CLI 当前不允许 `--check` 与 `--json-schema` 同时使用，因此结构化 review 在 prompt 内执行 schema-safe 自检，research 使用原生 `--check`。job metadata 的 `check_strategy` 会记录 `prompt`、`native` 或 `off`。
+显式 `max_turns`、`timeout`、`context_limit`、`transport_retries`、`check` 会覆盖 profile；结构化审查的 turn cap 只接受显式 `max_turns`。Companion CLI 的 `--check` / `--no-check` 与 MCP 的 `check: true|false` 都只控制 Companion 自检语义，不会原样转发给 Grok CLI。所有模式都在 prompt 内执行自检，避免依赖会随 Grok CLI 版本变化的参数。job metadata 的 `check_strategy` 会记录 `prompt` 或 `off`。
 
 这里启动工具的 `timeout` 是整个 Grok job 的运行预算，`grok_wait` 的 `timeout` 只是单次观察窗口（默认 180 秒，MCP 最长 600 秒），不会停止后台 job。
 

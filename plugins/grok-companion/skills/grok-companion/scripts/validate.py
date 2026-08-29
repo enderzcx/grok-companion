@@ -67,6 +67,8 @@ def validate() -> int:
         match = re.search(pattern, text, re.MULTILINE)
         if not match or match.group(1) != version:
             fail(f"{label} version does not match plugin manifest {version}")
+    if 'cmd.append("--check")' in grb or 'return "native"' in grb:
+        fail("grb must keep Companion self-check in prompts instead of forwarding Grok CLI --check")
 
     required_tools = {
         "grok_setup", "grok_ask", "grok_consult", "grok_review",

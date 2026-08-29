@@ -4,7 +4,7 @@
 
 Use the local **Grok CLI** as a full external collaborator inside **Codex**.
 
-Grok Companion v0.4.6 is a Codex plugin with 14 native MCP tools, plus an [Agent Plugins](https://agent-plugins.org/) 1.0.0 portable package surface. It covers consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
+Grok Companion v0.4.7 is a Codex plugin with 14 native MCP tools, plus an [Agent Plugins](https://agent-plugins.org/) 1.0.0 portable package surface. It covers consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
 
 > **This is not a Codex sidebar terminal.**
 >
@@ -116,7 +116,7 @@ When the embedded packet is truncated, the prompt tells Grok to tool-read the re
 
 Read-only `review` / `adversarial-review` jobs recover from explicit `reqwest` streaming transport failures twice by default inside the same total job `timeout`. The initial review is assigned a session; retries use `--resume`, disable tools, reuse completed analysis, and request only the final structured result instead of repeating the whole review. Every attempt, including a timed-out recovery, keeps its stdout/stderr and metadata; the pre-bound session also remains available to `continue` after failure. Other modes do not retry by default, avoiding duplicate writes or external side effects. An exhausted transport failure remains the primary error instead of being mislabeled as a review schema contract failure, and reports top-level `retryable=false` so a host does not restart the whole review again.
 
-Explicit `max_turns`, `timeout`, `context_limit`, `transport_retries`, and `check` values override the profile; structured reviews accept a turn cap only from an explicit `max_turns`. The CLI supports both `--check` and `--no-check`; MCP `check: true|false` is also explicit. Grok CLI currently rejects `--check` together with `--json-schema`, so structured reviews use a schema-safe prompt self-check while research uses native `--check`. Job metadata records `check_strategy` as `prompt`, `native`, or `off`.
+Explicit `max_turns`, `timeout`, `context_limit`, `transport_retries`, and `check` values override the profile; structured reviews accept a turn cap only from an explicit `max_turns`. Companion CLI `--check` / `--no-check` and MCP `check: true|false` only control Companion self-check semantics; they are not forwarded as Grok CLI flags. Every mode performs self-check through the task prompt so behavior does not depend on a version-specific Grok CLI option. Job metadata records `check_strategy` as `prompt` or `off`.
 
 A launch tool's `timeout` is the total Grok job runtime. The separate `grok_wait` timeout is only one observation window (default 180 seconds, MCP max 600) and never stops the background job. Explicit `context_limit` raises the embedded git/diff budget when needed.
 

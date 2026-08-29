@@ -421,7 +421,7 @@ class McpServerTests(unittest.TestCase):
                 self.initialize(client)
                 for tool, expected_strategy, native_flag in (
                     ("grok_review", "prompt", False),
-                    ("grok_research", "native", True),
+                    ("grok_research", "prompt", False),
                 ):
                     jobs = tmp / f"jobs-{tool}"
                     launch = client.request(
