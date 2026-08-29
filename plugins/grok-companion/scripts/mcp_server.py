@@ -16,11 +16,12 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.4.7"
+SERVER_VERSION = "0.4.8"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
 WRITE_LOCK = threading.Lock()
+VERSION_DIR_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
 
 
 def object_schema(
@@ -301,9 +302,56 @@ def terminated_process_payload(returncode: int) -> dict[str, Any] | None:
     }
 
 
+def runtime_version_key(runtime_path: Path) -> tuple[int, int, int, int, str]:
+    version = runtime_path.parents[1].name
+    match = VERSION_DIR_RE.fullmatch(version)
+    if not match:
+        return (0, 0, 0, 0, version)
+    return (1, *(int(part) for part in match.groups()), version)
+
+
+def resolve_grb_runtime() -> tuple[Path, dict[str, Any] | None]:
+    if GRB.is_file():
+        return GRB, None
+
+    version_root = GRB.parents[2]
+    resolved_root = version_root.resolve()
+    candidates: list[Path] = []
+    for candidate in version_root.glob("*/scripts/grb.py"):
+        resolved_candidate = candidate.resolve()
+        try:
+            resolved_candidate.relative_to(resolved_root)
+        except ValueError:
+            continue
+        if resolved_candidate.is_file():
+            candidates.append(resolved_candidate)
+    if candidates:
+        selected = max(candidates, key=runtime_version_key)
+        return selected, {
+            "reason": "configured_runtime_missing",
+            "from_version": GRB.parents[1].name,
+            "to_version": selected.parents[1].name,
+            "selected_runtime": str(selected),
+        }
+
+    message = f"Grok Companion runtime missing: {GRB}; no installed replacement under {version_root}"
+    raise FileNotFoundError(message)
+
+
 def invoke_grb(cwd: Path, args: list[str]) -> tuple[int, Any, str, str]:
+    try:
+        runtime, runtime_handoff = resolve_grb_runtime()
+    except FileNotFoundError as exc:
+        message = str(exc)
+        return 127, {
+            "status": "failed",
+            "error": "grb_runtime_missing",
+            "returncode": 127,
+            "retry_safe": True,
+            "message": message,
+        }, "", message
     proc = subprocess.run(
-        [sys.executable, str(GRB), *args],
+        [sys.executable, str(runtime), *args],
         cwd=str(cwd),
         stdin=subprocess.DEVNULL,
         text=True,
@@ -325,6 +373,11 @@ def invoke_grb(cwd: Path, args: list[str]) -> tuple[int, Any, str, str]:
             if stdout:
                 terminated["stdout_tail"] = stdout[-4000:]
             payload = terminated
+    if runtime_handoff is not None:
+        if isinstance(payload, dict):
+            payload = {**payload, "runtime_handoff": runtime_handoff}
+        else:
+            payload = {"output": payload, "runtime_handoff": runtime_handoff}
     return proc.returncode, payload, stdout, stderr
 
 

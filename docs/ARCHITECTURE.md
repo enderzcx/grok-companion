@@ -35,6 +35,8 @@ Read-only structured review modes also own a bounded transport-recovery policy. 
 
 Job runtime and waiting are intentionally separate. `grok_wait` observes one bounded window (default 180 seconds, MCP max 600). An incomplete window never cancels or restarts the background job; clients continue waiting with the same `job_id` until a terminal state or preserve the running job during handoff.
 
+The MCP adapter normally invokes the `grb.py` beside its own versioned installation. Codex may keep that MCP process alive while a marketplace reinstall replaces the version directory. If the pinned runtime disappears, the adapter resolves only within the same marketplace/plugin cache root, selects the highest semantic version containing `scripts/grb.py`, and reports a `runtime_handoff` receipt. It never searches arbitrary filesystem locations. If no replacement exists, it returns structured `grb_runtime_missing` evidence before any job starts.
+
 `grok_wait` performs one bounded long-poll over the same disk state and returns the terminal result when available. This keeps agents from issuing tight `grok_status` loops. A timed-out wait does not cancel or restart the job.
 
 ## MCP Surface

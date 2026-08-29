@@ -23,7 +23,7 @@ from shutil import which
 from typing import Any
 
 
-VERSION = "0.4.7"
+VERSION = "0.4.8"
 DEFAULT_PROFILE = "full"
 DEFAULT_MODEL = "grok-4.6"
 # full = complete Grok collaborator budget (no artificial turn starve, high reasoning, long runtime).

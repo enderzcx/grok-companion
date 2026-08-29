@@ -92,6 +92,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("recovery resumes it with tools disabled", combined)
         self.assertIn("not a raw Grok CLI flag", combined)
         self.assertIn("never add Grok's removed `--check` option", combined)
+        self.assertIn("runtime_handoff", combined)
+        self.assertIn("missing old cache alone is no longer a reason", combined)
         self.assertIn("same `job_id`", combined)
         self.assertIn("`job_ok: null`", combined)
         self.assertIn("wait_same_job", combined)

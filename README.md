@@ -4,7 +4,7 @@
 
 让 **Codex** 把本机 **Grok CLI** 当作完整的外部协作者使用。
 
-Grok Companion v0.4.7 是一个带 14 个原生 MCP 工具的 Codex plugin，同时提供 [Agent Plugins](https://agent-plugins.org/) 1.0.0 可移植包装。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
+Grok Companion v0.4.8 是一个带 14 个原生 MCP 工具的 Codex plugin，同时提供 [Agent Plugins](https://agent-plugins.org/) 1.0.0 可移植包装。Codex 可以直接调用 `grok_*` 做 consult、结构化只读 review、adversarial review、research、delegate、session 发现与续聊，以及带 Job Monitor 的后台 job 管理。
 
 > **这不是 Codex 侧边栏终端。**
 >
@@ -119,6 +119,8 @@ Codex 调用 grok_review / grok_research / grok_continue / ...
 显式 `max_turns`、`timeout`、`context_limit`、`transport_retries`、`check` 会覆盖 profile；结构化审查的 turn cap 只接受显式 `max_turns`。Companion CLI 的 `--check` / `--no-check` 与 MCP 的 `check: true|false` 都只控制 Companion 自检语义，不会原样转发给 Grok CLI。所有模式都在 prompt 内执行自检，避免依赖会随 Grok CLI 版本变化的参数。job metadata 的 `check_strategy` 会记录 `prompt` 或 `off`。
 
 这里启动工具的 `timeout` 是整个 Grok job 的运行预算，`grok_wait` 的 `timeout` 只是单次观察窗口（默认 180 秒，MCP 最长 600 秒），不会停止后台 job。
+
+插件升级清理旧版本 cache 后，已经打开的任务可能仍保留旧 MCP 进程。0.4.8 起，旧进程发现其固定 `grb.py` 已不存在时，会在同一 marketplace/plugin cache 根内选择最高已安装版本继续执行，并在结果中附带 `runtime_handoff`。新任务仍用于刷新 Skill 与 MCP schema，但旧任务不会再仅因版本目录被替换而直接失去 job 管理能力。
 
 ## 结构化 Review
 

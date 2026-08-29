@@ -4,7 +4,7 @@
 
 Use the local **Grok CLI** as a full external collaborator inside **Codex**.
 
-Grok Companion v0.4.7 is a Codex plugin with 14 native MCP tools, plus an [Agent Plugins](https://agent-plugins.org/) 1.0.0 portable package surface. It covers consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
+Grok Companion v0.4.8 is a Codex plugin with 14 native MCP tools, plus an [Agent Plugins](https://agent-plugins.org/) 1.0.0 portable package surface. It covers consultation, structured read-only review, adversarial review, research, delegation, session discovery and continuation, plus durable jobs with an inline Job Monitor.
 
 > **This is not a Codex sidebar terminal.**
 >
@@ -119,6 +119,8 @@ Read-only `review` / `adversarial-review` jobs recover from explicit `reqwest` s
 Explicit `max_turns`, `timeout`, `context_limit`, `transport_retries`, and `check` values override the profile; structured reviews accept a turn cap only from an explicit `max_turns`. Companion CLI `--check` / `--no-check` and MCP `check: true|false` only control Companion self-check semantics; they are not forwarded as Grok CLI flags. Every mode performs self-check through the task prompt so behavior does not depend on a version-specific Grok CLI option. Job metadata records `check_strategy` as `prompt` or `off`.
 
 A launch tool's `timeout` is the total Grok job runtime. The separate `grok_wait` timeout is only one observation window (default 180 seconds, MCP max 600) and never stops the background job. Explicit `context_limit` raises the embedded git/diff budget when needed.
+
+After an upgrade removes an old versioned cache, already-open tasks may still retain the old MCP process. Starting in 0.4.8, a process whose pinned `grb.py` disappeared selects the highest installed version under the same marketplace/plugin cache root and includes a `runtime_handoff` receipt in the result. A new task is still needed to refresh Skill instructions and MCP schemas, but old tasks no longer lose job management solely because their version directory was replaced.
 
 ## Structured Reviews
 

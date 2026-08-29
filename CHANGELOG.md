@@ -4,6 +4,11 @@ All notable changes to Grok Companion are documented here.
 
 ## Unreleased
 
+## 0.4.8 - 2026-08-29
+
+- Keep already-running MCP processes usable across marketplace reinstalls: when their pinned versioned `grb.py` is removed, resolve the highest installed runtime under the same plugin cache root and return a `runtime_handoff` receipt.
+- Return structured `grb_runtime_missing` evidence when no replacement runtime exists, and cover both the successful hot-upgrade handoff and missing-runtime terminal path with regression tests.
+
 ## 0.4.7 - 2026-08-29
 
 - Keep Companion self-check semantics in the task prompt for every mode instead of forwarding the removed Grok CLI `--check` flag; add a regression fake that rejects the stale option.

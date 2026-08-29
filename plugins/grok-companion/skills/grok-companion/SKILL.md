@@ -40,6 +40,8 @@ Treat this plugin like a full Grok collaborator bridge (same product idea as `op
 10. Follow [references/result-handling.md](references/result-handling.md) when presenting or accepting results.
 11. Use the bundled `scripts/grb.py` CLI only when MCP is unavailable or foreground execution is specifically required.
 
+After a plugin upgrade, an already-open task may retain an older MCP process. Version 0.4.8 and later hand that process off to the highest installed `grb.py` under the same marketplace/plugin cache root when its pinned runtime was removed. Preserve any returned `runtime_handoff` receipt. Start a new task when refreshed Skill instructions or MCP schemas matter; missing old cache alone is no longer a reason to relaunch a Grok job blindly.
+
 Explicit `max_turns`, job `timeout`, `context_limit`, `transport_retries`, and `check` values override the selected profile. The launch `timeout` is Grok's total job runtime across retries; the `grok_wait` timeout is only one observation window and never cancels the job.
 
 `check` is a Companion self-verification intent, not a raw Grok CLI flag. Full-profile review, adversarial review, and research inject the self-check contract into the task prompt; never add Grok's removed `--check` option to a launch command.

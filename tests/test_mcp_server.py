@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,10 +29,10 @@ def load_server_module():
 
 
 class McpClient:
-    def __init__(self, env: dict[str, str]):
+    def __init__(self, env: dict[str, str], *, server: Path = SERVER, cwd: Path = ROOT):
         self.proc = subprocess.Popen(
-            [sys.executable, str(SERVER)],
-            cwd=ROOT,
+            [sys.executable, str(server)],
+            cwd=cwd,
             env=env,
             text=True,
             stdin=subprocess.PIPE,
@@ -81,6 +82,70 @@ class McpServerTests(unittest.TestCase):
         server = load_server_module()
         self.assertIsNone(server.terminated_process_payload(0))
         self.assertIsNone(server.terminated_process_payload(1))
+
+    def test_runtime_version_key_prefers_highest_semver(self):
+        server = load_server_module()
+        older = Path("/cache/grok-companion/0.4.9/scripts/grb.py")
+        newer = Path("/cache/grok-companion/0.4.10/scripts/grb.py")
+        self.assertGreater(server.runtime_version_key(newer), server.runtime_version_key(older))
+
+    def test_missing_runtime_without_replacement_is_structured_failure(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "grok-companion" / "0.4.7" / "scripts" / "grb.py"
+            with mock.patch.object(server, "GRB", missing):
+                code, payload, stdout, stderr = server.invoke_grb(ROOT, ["setup"])
+        self.assertEqual(code, 127)
+        self.assertEqual(payload["error"], "grb_runtime_missing")
+        self.assertTrue(payload["retry_safe"])
+        self.assertEqual(stdout, "")
+        self.assertIn("no installed replacement", stderr)
+
+    def test_runtime_handoff_rejects_candidate_symlink_outside_cache_root(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            missing = tmp / "cache" / "grok-companion" / "0.4.7" / "scripts" / "grb.py"
+            outside = tmp / "outside-grb.py"
+            outside.write_text("print('outside')\n", encoding="utf-8")
+            linked = tmp / "cache" / "grok-companion" / "9.9.9" / "scripts" / "grb.py"
+            linked.parent.mkdir(parents=True)
+            linked.symlink_to(outside)
+            with mock.patch.object(server, "GRB", missing):
+                with self.assertRaises(FileNotFoundError):
+                    server.resolve_grb_runtime()
+
+    def test_running_old_mcp_hands_off_after_old_cache_is_removed(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            version_root = tmp / "cache" / "enderzcx" / "grok-companion"
+            old_root = version_root / "0.4.7"
+            new_root = version_root / "0.4.8"
+            old_server = old_root / "scripts" / "mcp_server.py"
+            new_grb = new_root / "scripts" / "grb.py"
+            old_server.parent.mkdir(parents=True)
+            new_grb.parent.mkdir(parents=True)
+            shutil.copy2(SERVER, old_server)
+            new_grb.write_text(
+                "import json\nprint(json.dumps({'status': 'ok', 'runtime_marker': '0.4.8'}))\n",
+                encoding="utf-8",
+            )
+            client = McpClient({**os.environ}, server=old_server, cwd=old_root)
+            try:
+                self.initialize(client)
+                shutil.rmtree(old_root)
+                response = client.request(
+                    "tools/call",
+                    {"name": "grok_setup", "arguments": {"cwd": str(tmp), "timeout": 2}},
+                )["result"]
+                self.assertFalse(response["isError"])
+                payload = response["structuredContent"]
+                self.assertEqual(payload["runtime_marker"], "0.4.8")
+                self.assertEqual(payload["runtime_handoff"]["from_version"], "0.4.7")
+                self.assertEqual(payload["runtime_handoff"]["to_version"], "0.4.8")
+                self.assertEqual(payload["runtime_handoff"]["reason"], "configured_runtime_missing")
+            finally:
+                client.close()
 
     def test_signal_termination_flows_through_mcp_result(self):
         for stdout in ("", '{"job_id":'):
