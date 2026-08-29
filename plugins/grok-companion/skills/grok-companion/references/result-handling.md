@@ -34,4 +34,6 @@
 - Authentication or model discovery failure: call `grok_setup` and report the exact failing check.
 - Job timeout or non-zero exit: preserve partial output and the stderr tail; do not silently rerun with a different model.
 - `grb_terminated_by_signal`: preserve the signal number and name, then inspect the same `cwd` / `jobs_dir` for an existing job before retrying. `SIGKILL` (`-9`) is a host/process termination, not a Grok job timeout, and blind retry can duplicate a job.
+- `runtime_handoff`: preserve the receipt and continue managing the same job through the selected installed runtime. A handoff does not authorize relaunching the task.
+- `grb_runtime_missing`: treat `retry_safe=false` as authoritative. Inspect the same `cwd` / `jobs_dir`, refresh or reinstall the plugin runtime, and recover status before deciding whether a launch is safe; wait/status/result/cancel may refer to a job that already exists.
 - Missing session: use `grok_sessions` or start a fresh task only after saying continuity could not be recovered.

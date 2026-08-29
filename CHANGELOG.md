@@ -4,6 +4,12 @@ All notable changes to Grok Companion are documented here.
 
 ## Unreleased
 
+## 0.4.9 - 2026-08-29
+
+- Preserve the public `structuredContent.jobs` shape when a list-returning status call crosses a runtime handoff.
+- Accept only complete, manifest-matching plugin packages as replacement runtimes; reject symlink escapes and leftover `grb.py` stubs or shims.
+- Mark `grb_runtime_missing` as unsafe to retry blindly and document recovery for launch and job-management calls.
+
 ## 0.4.8 - 2026-08-29
 
 - Keep already-running MCP processes usable across marketplace reinstalls: when their pinned versioned `grb.py` is removed, resolve the highest installed runtime under the same plugin cache root and return a `runtime_handoff` receipt.

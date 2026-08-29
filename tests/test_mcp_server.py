@@ -97,7 +97,7 @@ class McpServerTests(unittest.TestCase):
                 code, payload, stdout, stderr = server.invoke_grb(ROOT, ["setup"])
         self.assertEqual(code, 127)
         self.assertEqual(payload["error"], "grb_runtime_missing")
-        self.assertTrue(payload["retry_safe"])
+        self.assertFalse(payload["retry_safe"])
         self.assertEqual(stdout, "")
         self.assertIn("no installed replacement", stderr)
 
@@ -115,6 +115,20 @@ class McpServerTests(unittest.TestCase):
                 with self.assertRaises(FileNotFoundError):
                     server.resolve_grb_runtime()
 
+    def test_runtime_handoff_rejects_incomplete_grb_stub(self):
+        server = load_server_module()
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            missing = tmp / "cache" / "grok-companion" / "0.4.8" / "scripts" / "grb.py"
+            stub = tmp / "cache" / "grok-companion" / "0.4.7" / "scripts" / "grb.py"
+            stub.parent.mkdir(parents=True)
+            stub.write_text("print('legacy shim')\n", encoding="utf-8")
+            with mock.patch.object(server, "GRB", missing):
+                code, payload, _stdout, _stderr = server.invoke_grb(ROOT, ["setup"])
+        self.assertEqual(code, 127)
+        self.assertEqual(payload["error"], "grb_runtime_missing")
+        self.assertFalse(payload["retry_safe"])
+
     def test_running_old_mcp_hands_off_after_old_cache_is_removed(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -123,11 +137,21 @@ class McpServerTests(unittest.TestCase):
             new_root = version_root / "0.4.8"
             old_server = old_root / "scripts" / "mcp_server.py"
             new_grb = new_root / "scripts" / "grb.py"
+            new_manifest = new_root / ".codex-plugin" / "plugin.json"
+            new_schema = new_root / "schemas" / "review-output.schema.json"
+            new_server = new_root / "scripts" / "mcp_server.py"
             old_server.parent.mkdir(parents=True)
             new_grb.parent.mkdir(parents=True)
+            new_manifest.parent.mkdir(parents=True)
+            new_schema.parent.mkdir(parents=True)
             shutil.copy2(SERVER, old_server)
+            shutil.copy2(SERVER, new_server)
+            new_manifest.write_text(json.dumps({"name": "grok-companion", "version": "0.4.8"}), encoding="utf-8")
+            new_schema.write_text("{}\n", encoding="utf-8")
             new_grb.write_text(
-                "import json\nprint(json.dumps({'status': 'ok', 'runtime_marker': '0.4.8'}))\n",
+                "import json, sys\n"
+                "payload = [{'job_id': 'handoff-job'}] if len(sys.argv) > 1 and sys.argv[1] == 'status' else {'status': 'ok', 'runtime_marker': '0.4.8'}\n"
+                "print(json.dumps(payload))\n",
                 encoding="utf-8",
             )
             client = McpClient({**os.environ}, server=old_server, cwd=old_root)
@@ -144,6 +168,13 @@ class McpServerTests(unittest.TestCase):
                 self.assertEqual(payload["runtime_handoff"]["from_version"], "0.4.7")
                 self.assertEqual(payload["runtime_handoff"]["to_version"], "0.4.8")
                 self.assertEqual(payload["runtime_handoff"]["reason"], "configured_runtime_missing")
+                status = client.request(
+                    "tools/call",
+                    {"name": "grok_status", "arguments": {"cwd": str(tmp)}},
+                )["result"]
+                self.assertFalse(status["isError"])
+                self.assertEqual(status["structuredContent"]["jobs"], [{"job_id": "handoff-job"}])
+                self.assertEqual(status["structuredContent"]["runtime_handoff"]["to_version"], "0.4.8")
             finally:
                 client.close()
 

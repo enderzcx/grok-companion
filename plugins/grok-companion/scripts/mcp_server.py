@@ -16,7 +16,7 @@ from typing import Any
 
 
 SERVER_NAME = "grok-companion"
-SERVER_VERSION = "0.4.8"
+SERVER_VERSION = "0.4.9"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION}
 GRB = Path(__file__).with_name("grb.py").resolve()
@@ -310,6 +310,24 @@ def runtime_version_key(runtime_path: Path) -> tuple[int, int, int, int, str]:
     return (1, *(int(part) for part in match.groups()), version)
 
 
+def complete_plugin_runtime(runtime_path: Path) -> bool:
+    plugin_root = runtime_path.parents[1]
+    manifest_path = plugin_root / ".codex-plugin" / "plugin.json"
+    required = (
+        runtime_path,
+        plugin_root / "scripts" / "mcp_server.py",
+        plugin_root / "schemas" / "review-output.schema.json",
+        manifest_path,
+    )
+    if not all(path.is_file() for path in required):
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return manifest.get("name") == SERVER_NAME and manifest.get("version") == plugin_root.name
+
+
 def resolve_grb_runtime() -> tuple[Path, dict[str, Any] | None]:
     if GRB.is_file():
         return GRB, None
@@ -323,7 +341,7 @@ def resolve_grb_runtime() -> tuple[Path, dict[str, Any] | None]:
             resolved_candidate.relative_to(resolved_root)
         except ValueError:
             continue
-        if resolved_candidate.is_file():
+        if complete_plugin_runtime(resolved_candidate):
             candidates.append(resolved_candidate)
     if candidates:
         selected = max(candidates, key=runtime_version_key)
@@ -347,7 +365,7 @@ def invoke_grb(cwd: Path, args: list[str]) -> tuple[int, Any, str, str]:
             "status": "failed",
             "error": "grb_runtime_missing",
             "returncode": 127,
-            "retry_safe": True,
+            "retry_safe": False,
             "message": message,
         }, "", message
     proc = subprocess.run(
@@ -376,6 +394,8 @@ def invoke_grb(cwd: Path, args: list[str]) -> tuple[int, Any, str, str]:
     if runtime_handoff is not None:
         if isinstance(payload, dict):
             payload = {**payload, "runtime_handoff": runtime_handoff}
+        elif isinstance(payload, list):
+            payload = {"jobs": payload, "runtime_handoff": runtime_handoff}
         else:
             payload = {"output": payload, "runtime_handoff": runtime_handoff}
     return proc.returncode, payload, stdout, stderr
