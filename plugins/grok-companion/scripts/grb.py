@@ -45,6 +45,12 @@ TRANSPORT_RETRY_PROMPT = """Continue the current review session after the respon
 Reuse the analysis already completed in this session. Do not repeat repository exploration or call tools.
 Emit only the final JSON object required by the active review schema, with no surrounding prose.
 """
+REVIEW_CONTINUE_PROMPT = """Your previous turn ended before the review was performed: it contained no findings and no tool-backed
+evidence. Continue this same session now. Inspect the target with read-only tools (git diff/show/log, file reads),
+then emit the final JSON object required by the active review schema. A plan, an introduction, or "starting the
+review" is not a review. Use verdict "approve" only after inspection finds no actionable issue; verdict
+"needs-attention" requires at least one finding.
+"""
 RETRYABLE_TRANSPORT_MARKERS = (
     "reqwest error stream:",
     "error sending request for url",
@@ -201,25 +207,65 @@ def atomic_write_text(path: Path, value: str) -> None:
             temp.unlink()
 
 
+RESULT_FIELDS: tuple[str, ...] = (
+    "job_id",
+    "status",
+    "returncode",
+    "grok_returncode",
+    "text",
+    "parsed",
+    "session_id",
+    "review",
+    "contract_error",
+    "error_kind",
+    "retryable",
+    "recoveries_not_started",
+    "attempt_details",
+    "stderr_tail",
+)
+
+
+def write_result_json(job_dir: Path, **fields: Any) -> dict[str, Any]:
+    """Write result.json with one stable key set so every reader sees the same shape."""
+    unknown = set(fields) - set(RESULT_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown result fields: {sorted(unknown)}")
+    payload: dict[str, Any] = {key: None for key in RESULT_FIELDS}
+    payload["recoveries_not_started"] = 0
+    payload["attempt_details"] = []
+    payload["stderr_tail"] = ""
+    payload.update(fields)
+    atomic_write_text(job_dir / "result.json", json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    return payload
+
+
 def finalize_cancelled_job(job_dir: Path, meta: dict[str, Any], returncode: int = 130) -> dict[str, Any]:
+    # A runner that finished a moment before cancellation already wrote a terminal
+    # result; adopt it instead of replacing a real review with a cancelled stub.
+    try:
+        existing = load_result_payload(job_dir)
+    except (OSError, json.JSONDecodeError):
+        existing = None
+    if existing and existing.get("status") in TERMINAL_STATUSES - {"cancelled", "unknown"}:
+        meta["status"] = existing["status"]
+        meta["returncode"] = existing.get("returncode")
+        meta["finished_at"] = meta.get("finished_at") or utc_now()
+        meta["warning"] = "cancel requested after the job had already reached a terminal result; kept that result"
+        if existing.get("session_id"):
+            meta["result_session_id"] = existing["session_id"]
+        meta.pop("pid", None)
+        save_meta(job_dir, meta)
+        return meta
     result_path = job_dir / "result.md"
     text = result_path.read_text(encoding="utf-8") if result_path.exists() else ""
     atomic_write_text(result_path, text)
-    atomic_write_text(
-        job_dir / "result.json",
-        json.dumps(
-            {
-                "job_id": meta["job_id"],
-                "status": "cancelled",
-                "returncode": returncode,
-                "text": text.strip(),
-                "parsed": None,
-                "stderr_tail": "",
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
+    write_result_json(
+        job_dir,
+        job_id=meta["job_id"],
+        status="cancelled",
+        returncode=returncode,
+        text=text.strip(),
+        attempt_details=meta.get("attempt_details") or [],
     )
     meta["status"] = "cancelled"
     meta["returncode"] = returncode
@@ -463,9 +509,11 @@ def build_prompt(mode: str, task: str, args: argparse.Namespace, git_context: di
                     """
                     Run a thorough read-only code review. Do not propose broad rewrites unless needed for a concrete risk.
 
-                    Return only the JSON object required by the supplied review schema.
+                    Inspect the target with tools first; emit the final JSON object required by the supplied review schema
+                    only after that inspection is finished. A plan, an introduction, or "starting the review" is not a review.
                     Order findings by severity. Include precise file and line evidence when available.
                     Use an empty findings array and verdict "approve" when no actionable issue exists.
+                    Verdict "needs-attention" requires at least one finding.
                     Do not under-report material issues to stay short; structured output is a format constraint, not a severity budget.
 
                     Prioritize bugs, regressions, data loss, auth/security, concurrency, deploy/runtime breakage, and missing tests.
@@ -483,6 +531,8 @@ def build_prompt(mode: str, task: str, args: argparse.Namespace, git_context: di
                     Look for hidden coupling, bad abstractions, risky defaults, migration hazards,
                     operational blind spots, rollback failure, and simpler alternatives.
                     Keep it read-only, specific, and complete enough that the host can decide without redoing the investigation.
+                    Inspect the target with tools before emitting the final JSON object; a plan or an introduction is not a review,
+                    and verdict "needs-attention" requires at least one finding.
                     """
                 ),
             )
@@ -609,9 +659,12 @@ def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: di
     (job_dir / "prompt.md").write_text(prompt, encoding="utf-8")
     transport_retries = max(0, int(getattr(args, "transport_retries", 0) or 0))
     retry_session_id = None
-    if mode in TRANSPORT_RETRY_MODES and transport_retries:
+    if mode in UNBOUNDED_REVIEW_MODES:
+        # Review modes always own a stable session so an interrupted or unperformed
+        # review can be resumed inside the same job instead of re-running from scratch.
         retry_session_id = getattr(args, "session_id", None) or str(uuid.uuid4())
         (job_dir / "transport-retry-prompt.md").write_text(TRANSPORT_RETRY_PROMPT, encoding="utf-8")
+        (job_dir / "review-continue-prompt.md").write_text(REVIEW_CONTINUE_PROMPT, encoding="utf-8")
     if git_context is not None:
         atomic_write_text(job_dir / "context.json", json.dumps(git_context, ensure_ascii=False, indent=2) + "\n")
     meta = {
@@ -638,9 +691,11 @@ def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: di
         "check_strategy": resolved_check_strategy(mode, getattr(args, "check", False)),
         "best_of_n": getattr(args, "best_of_n", None),
         "transport_retries": transport_retries,
-        "transport_retry_strategy": "resume-finalize" if retry_session_id else "off",
+        "transport_retry_strategy": "resume-finalize" if retry_session_id and transport_retries else "off",
         "transport_retry_session_id": retry_session_id,
         "transport_retry_prompt_path": str(job_dir / "transport-retry-prompt.md") if retry_session_id else None,
+        "review_continue_prompt_path": str(job_dir / "review-continue-prompt.md") if retry_session_id else None,
+        "context_embedded": bool(git_context and str(git_context.get("name_status") or "").strip()),
         "session_id": getattr(args, "session_id", None),
         "format": getattr(args, "format", "md"),
         "prompt_path": str(job_dir / "prompt.md"),
@@ -652,8 +707,21 @@ def create_job(mode: str, prompt: str, args: argparse.Namespace, git_context: di
     return job_id, job_dir, meta
 
 
-def grok_command(meta: dict[str, Any], *, transport_retry: bool = False) -> list[str]:
-    prompt_path = meta.get("transport_retry_prompt_path") if transport_retry else meta["prompt_path"]
+def grok_command(meta: dict[str, Any], *, strategy: str = "initial") -> list[str]:
+    """Build the Grok CLI argv for one attempt.
+
+    strategy: "initial" runs the job prompt; "resume-finalize" resumes the review session
+    with tools disabled after a transport failure; "resume-continue" resumes the same
+    session with tools enabled after Grok ended without performing the review.
+    """
+    transport_retry = strategy == "resume-finalize"
+    review_continue = strategy == "resume-continue"
+    if transport_retry:
+        prompt_path = meta.get("transport_retry_prompt_path")
+    elif review_continue:
+        prompt_path = meta.get("review_continue_prompt_path")
+    else:
+        prompt_path = meta["prompt_path"]
     cmd = [
         meta.get("grok_bin") or "grok",
         "--prompt-file",
@@ -672,7 +740,7 @@ def grok_command(meta: dict[str, Any], *, transport_retry: bool = False) -> list
         cmd.extend(["--reasoning-effort", meta["reasoning_effort"]])
     if meta.get("best_of_n"):
         cmd.extend(["--best-of-n", str(meta["best_of_n"])])
-    if transport_retry and meta.get("transport_retry_session_id"):
+    if (transport_retry or review_continue) and meta.get("transport_retry_session_id"):
         cmd.extend(["--resume", meta["transport_retry_session_id"]])
     elif meta.get("session_id"):
         cmd.extend(["--resume", meta["session_id"]])
@@ -821,24 +889,16 @@ def finalize_runtime_failure(job_dir: Path, meta: dict[str, Any], message: str, 
     atomic_write_text(job_dir / "result.md", "")
     latest_meta = load_meta(job_dir)
     status = "cancelled" if latest_meta.get("status") in {"cancel_requested", "cancelled"} else "failed"
-    atomic_write_text(
-        job_dir / "result.json",
-        json.dumps(
-            {
-                "job_id": meta["job_id"],
-                "status": status,
-                "returncode": returncode,
-                "text": "",
-                "parsed": None,
-                "session_id": None,
-                "review": None,
-                "contract_error": message if returncode == 78 else None,
-                "stderr_tail": message,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
+    write_result_json(
+        job_dir,
+        job_id=meta["job_id"],
+        status=status,
+        returncode=returncode,
+        text="",
+        contract_error=message if returncode == 78 else None,
+        error_kind="contract" if returncode == 78 else "runtime",
+        attempt_details=latest_meta.get("attempt_details") or [],
+        stderr_tail=message,
     )
     latest_meta["status"] = status
     latest_meta["returncode"] = returncode
@@ -869,19 +929,96 @@ def subprocess_text(value: str | bytes | None) -> str:
     return value or ""
 
 
+def incomplete_review_reason(meta: dict[str, Any], stdout: str) -> str | None:
+    """Detect a schema-valid review that Grok emitted without actually reviewing.
+
+    Two deterministic signals: verdict needs-attention with zero findings is internally
+    inconsistent, and a single-turn answer when no diff was embedded means Grok never
+    used a tool to inspect the target it was asked to review.
+    """
+    if meta.get("mode") not in UNBOUNDED_REVIEW_MODES:
+        return None
+    _text, parsed = extract_text(stdout)
+    review = extract_review(parsed)
+    if review is None or review.get("findings"):
+        return None
+    if review.get("verdict") == "needs-attention":
+        return "Grok returned verdict needs-attention with zero findings"
+    turns = parsed.get("num_turns") if isinstance(parsed, dict) else None
+    if turns == 1 and not meta.get("context_embedded", True):
+        return "Grok ended after one turn without inspecting the repository (no diff was embedded)"
+    return None
+
+
+def record_attempt(
+    job_dir: Path,
+    attempts: list[dict[str, Any]],
+    *,
+    attempt: int,
+    returncode: int,
+    elapsed_seconds: float,
+    strategy: str,
+    session_id: str | None,
+    stdout: str,
+    stderr: str,
+    error: str | None,
+    retryable_transport_error: bool = False,
+    incomplete_review: bool = False,
+    will_retry: bool = False,
+    timed_out: bool = False,
+    started: bool = True,
+    extra_meta: dict[str, Any] | None = None,
+) -> None:
+    attempts.append(
+        {
+            "attempt": attempt,
+            "returncode": returncode,
+            "elapsed_seconds": round(elapsed_seconds, 3),
+            "retryable_transport_error": retryable_transport_error,
+            "incomplete_review": incomplete_review,
+            "will_retry": will_retry,
+            "timed_out": timed_out,
+            "started": started,
+            "strategy": strategy,
+            "session_id": session_id,
+            "error": error,
+            "stdout_chars": len(stdout),
+            "stderr_chars": len(stderr),
+        }
+    )
+    atomic_write_text(job_dir / f"attempt-{attempt}.stdout", stdout)
+    atomic_write_text(job_dir / f"attempt-{attempt}.stderr", stderr)
+    latest_meta = load_meta(job_dir)
+    latest_meta["attempt_details"] = attempts
+    if extra_meta:
+        latest_meta.update(extra_meta)
+    save_meta(job_dir, latest_meta)
+
+
 def run_grok_with_transport_retries(
     meta: dict[str, Any], cmd: list[str], job_dir: Path
-) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]], str | None]:
+) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]], str | None, str | None]:
+    """Run Grok once, plus bounded in-job recovery for read-only review modes.
+
+    Returns (final process, attempt details, transport error, incomplete-review reason).
+    Transport recovery resumes the session with tools off and asks only for the final JSON.
+    Incomplete-review recovery resumes the session with tools on and asks Grok to actually
+    perform the review; it is used at most once and only when the session is resumable.
+    """
     retry_limit = max(0, int(meta.get("transport_retries") or 0))
     total_timeout = max(1, int(meta.get("timeout") or DEFAULT_TIMEOUT))
     deadline = time.monotonic() + total_timeout
     attempts: list[dict[str, Any]] = []
-    final_transport_error: str | None = None
+    session_id = meta.get("transport_retry_session_id")
+    can_resume = bool(session_id)
+    transport_recoveries_used = 0
+    continue_recovery_used = False
+    strategy = "initial"
 
-    for attempt_number in range(1, retry_limit + 2):
-        attempt_cmd = cmd if attempt_number == 1 else grok_command(meta, transport_retry=True)
+    while True:
+        attempt_number = len(attempts) + 1
+        attempt_cmd = cmd if strategy == "initial" else grok_command(meta, strategy=strategy)
         remaining_budget = deadline - time.monotonic()
-        remaining = max(1, int(remaining_budget))
         started = time.monotonic()
         try:
             if remaining_budget <= 0:
@@ -892,7 +1029,7 @@ def run_grok_with_transport_retries(
                 stdin=subprocess.DEVNULL,
                 text=True,
                 capture_output=True,
-                timeout=remaining,
+                timeout=max(1, int(remaining_budget)),
             )
         except subprocess.TimeoutExpired as exc:
             stdout = subprocess_text(exc.stdout)
@@ -901,89 +1038,54 @@ def run_grok_with_transport_retries(
             if stderr and not stderr.endswith("\n"):
                 stderr += "\n"
             stderr += timeout_message + "\n"
-            attempts.append(
-                {
-                    "attempt": attempt_number,
-                    "returncode": 124,
-                    "elapsed_seconds": round(time.monotonic() - started, 3),
-                    "retryable_transport_error": False,
-                    "will_retry": False,
-                    "timed_out": True,
-                    "started": True,
-                    "strategy": "initial" if attempt_number == 1 else "resume-finalize",
-                    "session_id": meta.get("transport_retry_session_id"),
-                    "error": timeout_message,
-                    "stdout_chars": len(stdout),
-                    "stderr_chars": len(stderr),
-                }
+            record_attempt(
+                job_dir, attempts, attempt=attempt_number, returncode=124,
+                elapsed_seconds=time.monotonic() - started, strategy=strategy, session_id=session_id,
+                stdout=stdout, stderr=stderr, error=timeout_message, timed_out=True,
             )
-            atomic_write_text(job_dir / f"attempt-{attempt_number}.stdout", stdout)
-            atomic_write_text(job_dir / f"attempt-{attempt_number}.stderr", stderr)
-            latest_meta = load_meta(job_dir)
-            latest_meta["attempt_details"] = attempts
-            save_meta(job_dir, latest_meta)
-            return subprocess.CompletedProcess(attempt_cmd, 124, stdout, stderr), attempts, None
+            return subprocess.CompletedProcess(attempt_cmd, 124, stdout, stderr), attempts, None, None
+
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
         transport_error = retryable_transport_error(stdout, stderr) if proc.returncode != 0 else None
+        incomplete = incomplete_review_reason(meta, stdout) if proc.returncode == 0 else None
         retryable = transport_error is not None and meta.get("mode") in TRANSPORT_RETRY_MODES
+
+        next_strategy: str | None = None
+        if retryable and can_resume and transport_recoveries_used < retry_limit:
+            next_strategy = "resume-finalize"
+        elif incomplete and can_resume and not continue_recovery_used:
+            next_strategy = "resume-continue"
+
         backoff = min(2 ** attempt_number, 10)
-        will_retry = retryable and attempt_number <= retry_limit and deadline - time.monotonic() > backoff + 1
-        attempts.append(
-            {
-                "attempt": attempt_number,
-                "returncode": proc.returncode,
-                "elapsed_seconds": round(time.monotonic() - started, 3),
-                "retryable_transport_error": retryable,
-                "will_retry": will_retry,
-                "timed_out": False,
-                "started": True,
-                "strategy": "initial" if attempt_number == 1 else "resume-finalize",
-                "session_id": meta.get("transport_retry_session_id"),
-                "error": transport_error,
-                "stdout_chars": len(stdout),
-                "stderr_chars": len(stderr),
-            }
+        has_budget = deadline - time.monotonic() > backoff + 1
+        will_retry = next_strategy is not None and has_budget
+        record_attempt(
+            job_dir, attempts, attempt=attempt_number, returncode=proc.returncode,
+            elapsed_seconds=time.monotonic() - started, strategy=strategy, session_id=session_id,
+            stdout=stdout, stderr=stderr, error=transport_error or incomplete,
+            retryable_transport_error=retryable, incomplete_review=incomplete is not None, will_retry=will_retry,
         )
-        atomic_write_text(job_dir / f"attempt-{attempt_number}.stdout", stdout)
-        atomic_write_text(job_dir / f"attempt-{attempt_number}.stderr", stderr)
-        latest_meta = load_meta(job_dir)
-        latest_meta["attempt_details"] = attempts
-        save_meta(job_dir, latest_meta)
 
-        final_transport_error = transport_error
-        if retryable and attempt_number <= retry_limit and not will_retry:
-            skipped_attempt = attempt_number + 1
-            recoveries_not_started = retry_limit - attempt_number + 1
+        if next_strategy is not None and not will_retry:
+            skipped = attempt_number + 1
             timeout_message = "Recovery not started because the shared job deadline had insufficient remaining time"
-            attempts.append(
-                {
-                    "attempt": skipped_attempt,
-                    "returncode": 124,
-                    "elapsed_seconds": 0.0,
-                    "retryable_transport_error": False,
-                    "will_retry": False,
-                    "timed_out": True,
-                    "started": False,
-                    "strategy": "resume-finalize",
-                    "session_id": meta.get("transport_retry_session_id"),
-                    "error": timeout_message,
-                    "stdout_chars": 0,
-                    "stderr_chars": len(timeout_message) + 1,
-                }
+            not_started = (retry_limit - transport_recoveries_used) if next_strategy == "resume-finalize" else 1
+            record_attempt(
+                job_dir, attempts, attempt=skipped, returncode=124, elapsed_seconds=0.0,
+                strategy=next_strategy, session_id=session_id, stdout="", stderr=timeout_message + "\n",
+                error=timeout_message, timed_out=True, started=False,
+                extra_meta={"recoveries_not_started": not_started},
             )
-            atomic_write_text(job_dir / f"attempt-{skipped_attempt}.stdout", "")
-            atomic_write_text(job_dir / f"attempt-{skipped_attempt}.stderr", timeout_message + "\n")
-            latest_meta = load_meta(job_dir)
-            latest_meta["attempt_details"] = attempts
-            latest_meta["recoveries_not_started"] = recoveries_not_started
-            save_meta(job_dir, latest_meta)
         if not will_retry:
-            return proc, attempts, final_transport_error
+            return proc, attempts, transport_error, incomplete
 
+        if next_strategy == "resume-finalize":
+            transport_recoveries_used += 1
+        else:
+            continue_recovery_used = True
+        strategy = next_strategy
         time.sleep(backoff)
-
-    raise AssertionError("transport retry loop exited unexpectedly")
 
 
 def run_job(job_dir: Path) -> int:
@@ -1000,18 +1102,20 @@ def run_job(job_dir: Path) -> int:
         cmd = grok_command(meta)
         meta["command"] = cmd
         save_meta(job_dir, meta)
-        proc, attempt_details, transport_error = run_grok_with_transport_retries(meta, cmd, job_dir)
+        proc, attempt_details, transport_error, incomplete_review = run_grok_with_transport_retries(meta, cmd, job_dir)
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
         (job_dir / "raw.stdout").write_text(stdout, encoding="utf-8")
         (job_dir / "raw.stderr").write_text(stderr, encoding="utf-8")
         text, parsed = extract_text(stdout)
         session_id = extract_session_id(parsed) or meta.get("transport_retry_session_id")
-        review = extract_review(parsed) if meta.get("mode") in {"review", "adversarial-review"} else None
+        review = extract_review(parsed) if meta.get("mode") in UNBOUNDED_REVIEW_MODES else None
         contract_error = None
-        if meta.get("mode") in {"review", "adversarial-review"} and proc.returncode == 0:
+        if meta.get("mode") in UNBOUNDED_REVIEW_MODES and proc.returncode == 0:
             if review is None:
                 contract_error = "Grok review output did not match the required structured review contract"
+            elif incomplete_review:
+                contract_error = f"Grok did not perform the review: {incomplete_review}"
             else:
                 text = render_review_markdown(review)
         atomic_write_text(job_dir / "result.md", text.strip() + ("\n" if text.strip() else ""))
@@ -1026,23 +1130,23 @@ def run_job(job_dir: Path) -> int:
             status = "failed"
         effective_returncode = proc.returncode if proc.returncode != 0 else (1 if transport_error else 2 if contract_error else 0)
         error_kind = "timeout" if proc.returncode == 124 else "transport" if transport_error else "contract" if contract_error else None
-        result_json = {
-            "job_id": meta["job_id"],
-            "status": status,
-            "returncode": effective_returncode,
-            "grok_returncode": proc.returncode,
-            "text": text,
-            "parsed": parsed,
-            "session_id": session_id,
-            "review": review,
-            "contract_error": contract_error,
-            "error_kind": error_kind,
-            "retryable": False if error_kind in {"transport", "timeout"} else None,
-            "recoveries_not_started": latest_meta.get("recoveries_not_started", 0),
-            "attempt_details": attempt_details,
-            "stderr_tail": stderr[-4000:],
-        }
-        atomic_write_text(job_dir / "result.json", json.dumps(result_json, ensure_ascii=False, indent=2) + "\n")
+        write_result_json(
+            job_dir,
+            job_id=meta["job_id"],
+            status=status,
+            returncode=effective_returncode,
+            grok_returncode=proc.returncode,
+            text=text,
+            parsed=parsed,
+            session_id=session_id,
+            review=review,
+            contract_error=contract_error,
+            error_kind=error_kind,
+            retryable=False if error_kind in {"transport", "timeout"} else None,
+            recoveries_not_started=latest_meta.get("recoveries_not_started", 0),
+            attempt_details=attempt_details,
+            stderr_tail=stderr[-4000:],
+        )
         latest_meta["status"] = status
         latest_meta["returncode"] = effective_returncode
         latest_meta["grok_returncode"] = proc.returncode
@@ -1058,44 +1162,6 @@ def run_job(job_dir: Path) -> int:
         return finalize_runtime_failure(job_dir, meta, str(exc), 78)
     except FileNotFoundError:
         return finalize_runtime_failure(job_dir, meta, f"grok binary not found: {meta.get('grok_bin') or 'grok'}", 127)
-    except subprocess.TimeoutExpired as exc:
-        stdout = subprocess_text(exc.stdout)
-        stderr = subprocess_text(exc.stderr)
-        (job_dir / "raw.stdout").write_text(stdout, encoding="utf-8")
-        (job_dir / "raw.stderr").write_text(stderr + f"\nTimed out after {meta.get('timeout')}s\n", encoding="utf-8")
-        text, parsed = extract_text(stdout)
-        session_id = extract_session_id(parsed) or meta.get("transport_retry_session_id")
-        atomic_write_text(job_dir / "result.md", text.strip() + ("\n" if text.strip() else ""))
-        latest_meta = load_meta(job_dir)
-        status = "cancelled" if latest_meta.get("status") in {"cancel_requested", "cancelled"} else "timeout"
-        latest_meta["status"] = status
-        latest_meta["returncode"] = 124
-        latest_meta["finished_at"] = utc_now()
-        if session_id:
-            latest_meta["result_session_id"] = session_id
-        latest_meta.pop("pid", None)
-        save_meta(job_dir, latest_meta)
-        atomic_write_text(
-            job_dir / "result.json",
-            json.dumps(
-                {
-                    "job_id": meta["job_id"],
-                    "status": status,
-                    "returncode": 124,
-                    "text": text,
-                    "parsed": parsed,
-                    "session_id": session_id,
-                    "error_kind": "timeout",
-                    "retryable": False,
-                    "attempt_details": latest_meta.get("attempt_details", []),
-                    "stderr_tail": stderr[-4000:],
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-        )
-        return 124
 
 
 def start_background(job_dir: Path) -> int:
@@ -1381,6 +1447,16 @@ def build_monitor_snapshot(job_dir: Path, tail_chars: int = 4000) -> dict[str, A
             actions.append("continue")
     else:
         actions.extend(["wait", "cancel"])
+    attempt_details = meta.get("attempt_details") or []
+    last_attempt = attempt_details[-1] if attempt_details else None
+    if last_attempt and last_attempt.get("will_retry"):
+        # The next attempt is already running or about to start; report its strategy so a
+        # host watching a long job can tell "recovering" from "still on the first try".
+        in_flight_strategy = "resume-finalize" if last_attempt.get("retryable_transport_error") else "resume-continue"
+        attempt_number = int(last_attempt.get("attempt") or len(attempt_details)) + 1
+    else:
+        in_flight_strategy = last_attempt.get("strategy") if last_attempt else "initial"
+        attempt_number = int(last_attempt.get("attempt") or len(attempt_details)) if last_attempt else 1
     return {
         "version": VERSION,
         "job_id": meta.get("job_id"),
@@ -1404,6 +1480,9 @@ def build_monitor_snapshot(job_dir: Path, tail_chars: int = 4000) -> dict[str, A
         "alive": alive,
         "session_id": session_id,
         "job_dir": str(job_dir),
+        "attempt": attempt_number,
+        "attempt_strategy": in_flight_strategy,
+        "recovering": (not terminal) and in_flight_strategy != "initial",
         "stream_available": False,
         "stdout_tail": read_tail(job_dir / "raw.stdout", tail_chars),
         "stderr_tail": read_tail(job_dir / "raw.stderr", tail_chars),
@@ -1538,6 +1617,7 @@ def print_watch_snapshot(snapshot: dict[str, Any]) -> None:
     print(f"Grok Job  {snapshot['job_id']}")
     print(f"status    {snapshot['status']}  elapsed {snapshot['elapsed_seconds']}s  alive {str(snapshot['alive']).lower()}")
     print(f"runtime   {snapshot['profile']}  {turns} turns  {snapshot['timeout']}s  check {snapshot['check_strategy']}")
+    print(f"attempt   {snapshot['attempt']}  {snapshot['attempt_strategy']}")
     print(f"session   {snapshot['session_id'] or '-'}")
     preview = snapshot.get("result_preview") or snapshot.get("runner_stderr_tail") or "Process status only; Grok output is stored when the job exits."
     print("\n" + str(preview).strip())

@@ -4,6 +4,14 @@ All notable changes to Grok Companion are documented here.
 
 ## Unreleased
 
+- Stop reporting `job_ok=true` for a review Grok never performed. A schema-valid answer with verdict `needs-attention` and zero findings, or a single-turn answer when no diff was embedded, is treated as unperformed: the job resumes the same session once with tools enabled (`resume-continue`) and asks Grok to inspect the target; if still unperformed, the job fails with `error_kind=contract` and `contract_error` "Grok did not perform the review".
+- Every review job now owns a stable session from the first attempt, so both transport finalization and continue recovery can resume it; `meta.json` records `context_embedded` and `review_continue_prompt_path`.
+- Review prompts tell Grok to inspect with tools before emitting the final JSON and that `needs-attention` requires at least one finding.
+- `result.json` has one key set across complete, failed, timeout, and cancelled paths (`write_result_json`); removed an unreachable `TimeoutExpired` branch in `run_job` and folded three attempt-record blocks into `record_attempt`. `attempt_details` entries gain `incomplete_review`.
+- A cancel or status refresh that lands after the runner already wrote a terminal `result.json` keeps that result instead of replacing a finished review with a cancelled stub.
+- `grok_status detail=monitor`, `grok_monitor`, and `watch` report the current `attempt`, its `attempt_strategy`, and `recovering`, so a host watching a long job can tell an in-job recovery from a first attempt.
+- MCP tool wording is host-neutral so the same server reads correctly from Cursor as well as Codex; `grok_adversarial_review` and `transport_retries` describe the inspection-recovery contract.
+
 ## 0.4.9 - 2026-08-29
 
 - Preserve the public `structuredContent.jobs` shape when a list-returning status call crosses a runtime handoff.

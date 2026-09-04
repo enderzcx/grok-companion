@@ -78,6 +78,14 @@ def make_fake_grok(tmp: Path) -> Path:
             if os.environ.get("GROK_FAKE_SLEEP"):
                 time.sleep(float(os.environ["GROK_FAKE_SLEEP"]))
 
+            incomplete_counter = os.environ.get("GROK_FAKE_INCOMPLETE_COUNTER")
+            plan_only = False
+            if incomplete_counter:
+                counter_path = Path(incomplete_counter)
+                count = int(counter_path.read_text(encoding="utf-8")) if counter_path.exists() else 0
+                counter_path.write_text(str(count + 1), encoding="utf-8")
+                plan_only = count < int(os.environ.get("GROK_FAKE_INCOMPLETE_FAILURES", "1"))
+
             prompt = ""
             if "--prompt-file" in sys.argv:
                 idx = sys.argv.index("--prompt-file")
@@ -92,6 +100,10 @@ def make_fake_grok(tmp: Path) -> Path:
                 review_mode = os.environ.get("GROK_FAKE_REVIEW_MODE", "text")
                 if review_mode == "invalid":
                     review["findings"] = [{"severity": "nope"}]
+                if plan_only:
+                    review["verdict"] = "needs-attention"
+                    review["summary"] = "Starting a read-only review. I will inspect the files first."
+                    review["next_steps"] = ["Read the named source files"]
                 text = "structured review envelope" if review_mode == "structured-only" else json.dumps(review)
             else:
                 text = "FAKE GROK RESULT\\n" + prompt[:120]
@@ -99,6 +111,8 @@ def make_fake_grok(tmp: Path) -> Path:
                 "text": text,
                 "argv": sys.argv[1:]
             }
+            if os.environ.get("GROK_FAKE_NUM_TURNS"):
+                payload["num_turns"] = int(os.environ["GROK_FAKE_NUM_TURNS"])
             if "--json-schema" in sys.argv and os.environ.get("GROK_FAKE_REVIEW_MODE") in {"structured-only", "invalid"}:
                 payload["structuredOutput"] = review
             if not os.environ.get("GROK_FAKE_NO_SESSION"):
@@ -641,6 +655,204 @@ class GrbTests(unittest.TestCase):
             self.assertEqual(skipped["strategy"], "resume-finalize")
             self.assertIn("insufficient remaining time", skipped["error"])
             self.assertEqual(result["recoveries_not_started"], 1)
+
+    def test_unperformed_review_resumes_session_with_tools_enabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            counter = tmp / "incomplete-count"
+            argv_log = tmp / "argv.jsonl"
+            proc = self.run_grb(
+                tmp,
+                "review",
+                "--jobs-dir",
+                str(jobs),
+                "review the plugin",
+                extra_env={
+                    "GROK_FAKE_INCOMPLETE_COUNTER": str(counter),
+                    "GROK_FAKE_INCOMPLETE_FAILURES": "1",
+                    "GROK_FAKE_ARGV_LOG": str(argv_log),
+                },
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            job = next(jobs.iterdir())
+            result = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "complete")
+            self.assertIsNone(result["contract_error"])
+            self.assertEqual(result["review"]["verdict"], "approve")
+            self.assertEqual(len(result["attempt_details"]), 2)
+            first, second = result["attempt_details"]
+            self.assertTrue(first["incomplete_review"])
+            self.assertFalse(first["retryable_transport_error"])
+            self.assertTrue(first["will_retry"])
+            self.assertIn("zero findings", first["error"])
+            self.assertEqual(second["strategy"], "resume-continue")
+            self.assertFalse(second["incomplete_review"])
+            first_argv, retry_argv = [json.loads(line) for line in argv_log.read_text(encoding="utf-8").splitlines()]
+            self.assertIn("--session-id", first_argv)
+            self.assertIn("--resume", retry_argv)
+            self.assertEqual(retry_argv[retry_argv.index("--resume") + 1], meta["transport_retry_session_id"])
+            self.assertNotIn("--tools", retry_argv, "continue recovery must keep Grok's tools enabled")
+            self.assertIn("review-continue-prompt.md", retry_argv[retry_argv.index("--prompt-file") + 1])
+            self.assertIn("--json-schema", retry_argv)
+            self.assertTrue((job / "review-continue-prompt.md").exists())
+
+    def test_review_still_unperformed_after_recovery_is_contract_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            counter = tmp / "incomplete-count"
+            proc = self.run_grb(
+                tmp,
+                "adversarial-review",
+                "--jobs-dir",
+                str(jobs),
+                "challenge the plugin",
+                extra_env={
+                    "GROK_FAKE_INCOMPLETE_COUNTER": str(counter),
+                    "GROK_FAKE_INCOMPLETE_FAILURES": "5",
+                },
+            )
+            self.assertEqual(proc.returncode, 2)
+            job = next(jobs.iterdir())
+            result = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["error_kind"], "contract")
+            self.assertIn("did not perform the review", result["contract_error"])
+            self.assertEqual(result["grok_returncode"], 0)
+            self.assertEqual(len(result["attempt_details"]), 2, "continue recovery is used at most once")
+            self.assertTrue(all(item["incomplete_review"] for item in result["attempt_details"]))
+            self.assertIn("did not perform", meta["error"])
+            self.assertTrue(result["session_id"], "session stays discoverable for a manual continue")
+            self.assertNotIn("# Grok Review", (job / "result.md").read_text(encoding="utf-8"))
+
+    def test_single_turn_review_without_embedded_diff_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            proc = self.run_grb(
+                tmp,
+                "review",
+                "--jobs-dir",
+                str(jobs),
+                "review a repository that had nothing to embed",
+                extra_env={"GROK_FAKE_NUM_TURNS": "1"},
+            )
+            self.assertEqual(proc.returncode, 2)
+            job = next(jobs.iterdir())
+            result = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            self.assertFalse(meta["context_embedded"])
+            self.assertIn("without inspecting the repository", result["contract_error"])
+            self.assertEqual(result["attempt_details"][1]["strategy"], "resume-continue")
+
+    def test_single_turn_review_with_embedded_diff_stays_complete(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            subprocess.run(["git", "init"], cwd=tmp, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp, check=True)
+            (tmp / "app.py").write_text("print('one')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=tmp, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=tmp, check=True, capture_output=True)
+            (tmp / "app.py").write_text("print('two')\n", encoding="utf-8")
+            jobs = tmp / "jobs"
+            proc = self.run_grb(
+                tmp,
+                "review",
+                "--jobs-dir",
+                str(jobs),
+                "small embedded diff",
+                extra_env={"GROK_FAKE_NUM_TURNS": "1"},
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            job = next(jobs.iterdir())
+            result = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            self.assertTrue(meta["context_embedded"])
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual(len(result["attempt_details"]), 1)
+
+    def test_result_json_has_one_shape_across_terminal_paths(self):
+        expected = {
+            "job_id", "status", "returncode", "grok_returncode", "text", "parsed", "session_id", "review",
+            "contract_error", "error_kind", "retryable", "recoveries_not_started", "attempt_details", "stderr_tail",
+        }
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            complete = self.run_grb(tmp, "ask", "--jobs-dir", str(jobs), "shape complete")
+            self.assertEqual(complete.returncode, 0, complete.stderr)
+            missing_bin = self.run_grb(
+                tmp, "ask", "--jobs-dir", str(jobs), "--grok-bin", str(tmp / "missing-grok"), "shape runtime failure"
+            )
+            self.assertEqual(missing_bin.returncode, 127)
+            started = self.run_grb(
+                tmp, "ask", "--background", "--jobs-dir", str(jobs), "shape cancelled",
+                extra_env={"GROK_FAKE_SLEEP": "30"},
+            )
+            self.assertEqual(started.returncode, 0, started.stderr)
+            job_id = json.loads(started.stdout)["job_id"]
+            time.sleep(0.5)
+            cancelled = self.run_grb(tmp, "cancel", job_id, "--jobs-dir", str(jobs), "--json")
+            self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+            shapes = {}
+            for job in sorted(jobs.iterdir()):
+                payload = json.loads((job / "result.json").read_text(encoding="utf-8"))
+                shapes[payload["status"]] = set(payload)
+            self.assertEqual(set(shapes), {"complete", "failed", "cancelled"})
+            for status, keys in shapes.items():
+                self.assertEqual(keys, expected, f"result.json keys differ for status={status}")
+
+    def test_cancel_after_terminal_result_keeps_the_completed_review(self):
+        grb = load_grb_module()
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            proc = self.run_grb(tmp, "ask", "--jobs-dir", str(jobs), "finished just before cancel")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            job = next(jobs.iterdir())
+            before = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(before["status"], "complete")
+            # Simulate a cancel that raced the runner: meta says cancel_requested with a dead pid.
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            meta["status"] = "cancel_requested"
+            meta["pid"] = 2**22 + 12345
+            (job / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+            refreshed = grb.refresh_job_meta(job)
+            after = json.loads((job / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(refreshed["status"], "complete")
+            self.assertEqual(after, before, "a finished result must not be replaced by a cancelled stub")
+            self.assertIn("already reached a terminal result", refreshed["warning"])
+            self.assertNotIn("pid", refreshed)
+
+    def test_monitor_snapshot_reports_in_flight_recovery(self):
+        grb = load_grb_module()
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            jobs = tmp / "jobs"
+            counter = tmp / "incomplete-count"
+            proc = self.run_grb(
+                tmp, "review", "--jobs-dir", str(jobs), "snapshot after recovery",
+                extra_env={"GROK_FAKE_INCOMPLETE_COUNTER": str(counter), "GROK_FAKE_INCOMPLETE_FAILURES": "1"},
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            job = next(jobs.iterdir())
+            snapshot = grb.build_monitor_snapshot(job)
+            self.assertEqual(snapshot["attempt"], 2)
+            self.assertEqual(snapshot["attempt_strategy"], "resume-continue")
+            self.assertFalse(snapshot["recovering"], "terminal jobs are not recovering")
+            meta = json.loads((job / "meta.json").read_text(encoding="utf-8"))
+            meta["status"] = "running"
+            meta["pid"] = os.getpid()
+            meta["attempt_details"] = meta["attempt_details"][:1]
+            (job / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+            live = grb.build_monitor_snapshot(job)
+            self.assertEqual(live["attempt"], 2)
+            self.assertEqual(live["attempt_strategy"], "resume-continue")
+            self.assertTrue(live["recovering"])
 
     def test_non_review_transport_failure_is_not_retried_by_default(self):
         with tempfile.TemporaryDirectory() as td:

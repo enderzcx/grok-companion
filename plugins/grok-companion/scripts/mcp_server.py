@@ -42,7 +42,7 @@ def object_schema(
 
 CWD = {
     "type": "string",
-    "description": "Absolute path of the current Codex workspace or repository.",
+    "description": "Absolute path of the current workspace or repository. Job artifacts and git context attach here.",
 }
 JOBS_DIR = {
     "type": "string",
@@ -80,7 +80,7 @@ RUNTIME_PROPERTIES: dict[str, Any] = {
         "type": "integer",
         "minimum": 0,
         "maximum": 5,
-        "description": "Recovery count for retryable Grok transport failures. Defaults to 2 for read-only review/adversarial-review and is forced to 0 for other modes. Recoveries share the job timeout budget.",
+        "description": "Recovery count for retryable Grok transport failures. Defaults to 2 for read-only review/adversarial-review and is forced to 0 for other modes. Recoveries share the job timeout budget. Separate from this count, a review that Grok answered without inspecting anything is resumed once with tools enabled; that inspection recovery is automatic and is not disabled by 0.",
     },
     "context_limit": {
         "type": "integer",
@@ -135,12 +135,12 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "grok_review",
-        "description": "Run a read-only Grok code review over the working tree or base...HEAD. Findings only; Grok must not edit files.",
+        "description": "Run a read-only Grok code review over the working tree or base...HEAD. Findings only; Grok must not edit files. A review that ends without inspecting the target fails with a contract error instead of reporting success.",
         "inputSchema": launch_schema(base=True),
     },
     {
         "name": "grok_adversarial_review",
-        "description": "Run a read-only Grok challenge review focused on architecture, assumptions, failure modes, and alternatives.",
+        "description": "Run a read-only Grok challenge review focused on architecture, assumptions, failure modes, and alternatives. A review that ends without inspecting the target fails with a contract error instead of reporting success.",
         "inputSchema": launch_schema(base=True),
     },
     {
@@ -181,7 +181,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "grok_status",
-        "description": "List recent Grok jobs or inspect one job. detail=monitor returns a rich status snapshot without claiming live token streaming.",
+        "description": "List recent Grok jobs or inspect one job. detail=monitor returns a rich status snapshot (including the current attempt and whether an in-job recovery is running) without claiming live token streaming.",
         "inputSchema": object_schema(
             {
                 "cwd": CWD,
@@ -297,7 +297,7 @@ def terminated_process_payload(returncode: int) -> dict[str, Any] | None:
         "message": (
             f"grb was terminated by signal {signal_number} ({signal_name}) before it completed cleanly. "
             "This is not a Grok job timeout. Check the same cwd and jobs_dir for an existing job before "
-            "retrying; if no job exists, restart Codex App to rebuild the MCP process."
+            "retrying; if no job exists, restart the host application to rebuild the MCP process."
         ),
     }
 
@@ -588,9 +588,11 @@ def handle_request(message: dict[str, Any]) -> dict[str, Any] | None:
                         "uses job_ok=null and next_action=wait_same_job; it does not justify cancellation or restart. "
                         "Only terminal job_ok=false is a job failure. Full is the default complete-collaborator profile "
                         "(no turn cap, effort xhigh, 7200s runtime, 256k-char structured context); quick is opt-in smoke only. "
-                        "Read-only structured reviews retry explicit reqwest transport failures twice inside the same job timeout. "
+                        "Read-only structured reviews retry explicit reqwest transport failures twice inside the same job timeout, "
+                        "and resume the session once if Grok answered without actually inspecting the target; a review that still "
+                        "has no inspection fails with contract_error instead of job_ok=true. "
                         "Do not add max_turns merely to fit one host wait. Default model is grok-4.6; xhigh is valid there. "
-                        "Do not pass xhigh/max on grok-4.5 (CLI only accepts high|medium|low). Use grok_monitor for a refreshable inline job snapshot, and "
+                        "Do not pass xhigh/max on grok-4.5 (CLI only accepts high|medium|low). Use grok_monitor for a refreshable inline job snapshot (Codex hosts), and "
                         "grok_sessions plus grok_continue for continuity. Use superx for exact X/Twitter retrieval."
                     ),
                 },
